@@ -1,0 +1,52 @@
+# Integration repository
+
+> This file marks this repo as an **integration repository**. If you are an
+> agent or a human working here, read this before touching git.
+
+This repository's working tree contains the files of several **constituent
+repositories**, tracked by this parent repo as **ordinary files**. This parent
+repo does **not** use git submodules and does **not** know the files came from
+other repos. Each constituent under `constituents/<name>/` nonetheless has its
+own real `.git` and its own remote — the parent simply ignores it.
+
+Managed by the `git-integration-repo` skill.
+
+## Rules (do not break these)
+
+1. **Never `git add` a constituent directory while it contains a `.git`.** That
+   turns it into a gitlink/submodule and breaks the repo. Constituent files are
+   only ever committed to the parent while the constituent has **no** `.git`
+   (that happens during onboarding, before the `.git` is restored).
+2. **Never put an ignore file inside a constituent** for parent-only concerns.
+   Root `.gitignore` owns those (`constituents/*/target/`, etc.), because a
+   constituent's `git reset --hard` would wipe a file placed inside it.
+3. The parent working tree should normally be **clean**. If `git status` shows
+   constituent files as modified, that is real work in progress — either a
+   change you are making, or upstream drift after a refresh.
+
+## How to make a cross-repo change
+
+```bash
+# 1. Open a ticketed worktree (plain files, no constituent .git inside it):
+<skill>/scripts/new-change.sh TICKET-123
+
+# 2. Edit across constituents in ../<repo>-TICKET-123, then commit to the
+#    parent feature branch and merge it back into the integration main tree.
+
+# 3. Fan the merged change out to each affected constituent:
+<skill>/scripts/propagate.sh TICKET-123
+#    -> per constituent: feature/TICKET-123 branch, commit, push, open an MR,
+#       and file ONE tracking issue for a downstream agent to run tests + merge.
+```
+
+## Manifest
+
+The constituents, git host, and enabled compositions are declared in
+`integration.toml`. Scripts read it. Keep it in sync when adding or removing a
+constituent.
+
+## Refresh from upstream (destructive)
+
+`<skill>/scripts/refresh.sh [name]` runs `fetch --all` + `reset --hard` on each
+constituent. It **discards** any un-pushed local content in that constituent.
+Propagate/push first, then refresh.

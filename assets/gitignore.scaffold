@@ -1,0 +1,39 @@
+# Integration repository root .gitignore.
+#
+# IMPORTANT: parent-only ignore rules live HERE, at the repo root — never inside
+# a constituent directory. A constituent's `git reset --hard` would wipe any
+# file placed inside it, so keep integration-level ignores at the root and
+# scope them by path.
+#
+# A constituent that ships its own .gitignore upstream keeps it (it is preserved
+# as a normal tracked file during onboarding); this file only adds the extra,
+# integration-side artifacts the parent must not version-control.
+
+# --- integration internals ---
+.integration/tmp/
+*.integration.local
+
+# --- constituent build / dependency artifacts (path-scoped) ---
+constituents/*/target/
+constituents/*/build/
+constituents/*/dist/
+constituents/*/out/
+constituents/*/.venv/
+constituents/*/venv/
+constituents/*/node_modules/
+constituents/*/.gradle/
+constituents/*/.idea/
+constituents/**/__pycache__/
+constituents/**/*.pyc
+constituents/**/*.class
+constituents/**/*.log
+
+# --- composition workspaces (parent-managed, keep sources, drop generated) ---
+specs/**/_generated/
+test_graph/**/reports/
+test_graph/**/.runs/
+deploy/**/.rendered/
+
+# --- os / editor noise ---
+.DS_Store
+*.swp

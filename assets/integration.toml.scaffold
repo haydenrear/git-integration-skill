@@ -1,0 +1,26 @@
+# Integration repository manifest — machine-read by the git-integration-repo
+# skill scripts. Edit the [[constituent]] blocks and [compositions] flags to
+# match this repo; add-constituent.sh appends blocks here for you.
+
+[integration]
+name = "REPLACE_ME"
+# Git host for the constituents' remotes. Controls which CLI propagate.sh uses
+# to open merge requests and tracking issues: "gitlab" -> glab, "github" -> gh.
+host = "gitlab"
+
+[compositions]
+# tla-spec-dev spec doubles + spec unit tests spanning constituents.
+spec_double_compiler = true
+# test_graph spec/validation graphs spanning constituents.
+test_graph = true
+# Optional: environment-repo + deploy-helm to deploy all constituents together
+# to a test cluster (usually false; enable only when this repo deploys apps).
+deploy_helm = false
+
+# One block per constituent. `path` is relative to the repo root.
+#
+# [[constituent]]
+# name = "service-a"
+# path = "constituents/service-a"
+# remote = "git@gitlab.com:org/service-a.git"
+# default_branch = "main"

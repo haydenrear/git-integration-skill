@@ -1,0 +1,21 @@
+# git-integration-repo — skill-manager unit manifest.
+#
+# No hard skill_references: the composed skills (spec-double-compiler,
+# test-graph, deploy-helm) are semantic imports declared in SKILL.md
+# frontmatter, not forced transitive installs. They are invoked when present;
+# see references/composition.md. Keeping them out of skill_references keeps this
+# unit's install self-contained and avoids coord-resolution failures.
+skill_references = [
+  # "skill:spec-double-compiler",
+  # "skill:test-graph",
+  # "skill:deploy-helm",
+]
+
+# git, and optionally the git host CLI (glab for GitLab MRs/issues, gh for
+# GitHub), are assumed already on PATH. propagate.sh detects which is available
+# and degrades gracefully to printing the steps if neither is installed.
+
+[skill]
+name = "git-integration-repo"
+version = "0.1.0"
+description = "Create and operate integration repositories: many repos tracked as plain files in one parent, changed via worktrees, fanned back out as branches/MRs."
