@@ -6,9 +6,9 @@
 # see references/composition.md. Keeping them out of skill_references keeps this
 # unit's install self-contained and avoids coord-resolution failures.
 skill_references = [
-  # "skill:spec-double-compiler",
-  # "skill:test-graph",
-  # "skill:deploy-helm",
+  "github:haydenrear/spec-double-compiler",
+  "github:haydenrear/test-graph",
+  "github:haydenrear/deploy-helm",
 ]
 
 # git, and optionally the git host CLI (glab for GitLab MRs/issues, gh for
