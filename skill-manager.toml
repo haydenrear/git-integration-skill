@@ -5,11 +5,7 @@
 # frontmatter, not forced transitive installs. They are invoked when present;
 # see references/composition.md. Keeping them out of skill_references keeps this
 # unit's install self-contained and avoids coord-resolution failures.
-skill_references = [
-  "github:haydenrear/spec-double-compiler",
-  "github:haydenrear/test-graph",
-  "github:haydenrear/deploy-helm",
-]
+skill_references = []
 
 # git, and optionally the git host CLI (glab for GitLab MRs/issues, gh for
 # GitHub), are assumed already on PATH. propagate.sh detects which is available
