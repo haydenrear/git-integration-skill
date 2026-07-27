@@ -91,6 +91,7 @@ constituent would clobber it.
 | Task | Read | Scripts |
 |---|---|---|
 | Create / onboard an integration repo | `references/onboarding.md` | `scripts/init-integration.sh`, `scripts/add-constituent.sh`, `scripts/finalize-constituents.sh`, `scripts/verify.sh` |
+| Give a checkout its own skill-manager home | `references/skill-homes.md` | `scripts/bootstrap-home.sh` |
 | Make a ticketed multi-repo change | `references/worktrees.md` | `scripts/new-change.sh` |
 | Fan a merged change out to constituents | `references/propagation.md` | `scripts/propagate.sh` |
 | Scaffold spec / test-graph / deploy | `references/composition.md` | (invokes the composed skills) |
@@ -110,14 +111,25 @@ git add -A && git commit -m "onboard constituents"   # commit BEFORE finalize
 $S/finalize-constituents.sh                       # re-init .git + remote + fetch + reset --hard, all constituents
 $S/verify.sh                                      # assert parent clean + every constituent wired
 
+# --- agent homes ---
+$S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-manager home (idempotent)
+
 # --- change ---
 $S/new-change.sh TICKET-123                        # parent worktree on feature/TICKET-123 (plain files)
+#   ...also bootstraps the worktree's OWN home; launch agents via
+#      ../<repo>-TICKET-123/.skill-manager/bin/launch/claude
 #   ...edit across constituents in the worktree, commit to the parent feature branch...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
 
 # --- fan out ---
 $S/propagate.sh TICKET-123                          # per-constituent: branch, commit, push, MR + one tracking issue
 ```
+
+`propagate.sh` fans a **parent** change out to constituents. Sending a **skill**
+edit an agent made inside its own home back to that skill's repo is a different
+flow (push-back) that `propagate.sh` cannot do, because the home is gitignored
+and never in the parent diff. `references/skill-homes.md` has the comparison;
+confusing the two silently loses the skill edit at worktree teardown.
 
 Always finish an onboarding or a propagation by running `scripts/verify.sh` and
 confirming the parent tree is clean.

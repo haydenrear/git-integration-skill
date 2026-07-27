@@ -41,6 +41,14 @@ $S/verify.sh
 
 # 8. Commit the compositions and the markers.
 git add -A && git commit -m "scaffold compositions + markers"
+
+# 9. Give the repo its own skill-manager home, so agents working here never
+#    touch the operator's global one (see references/skill-homes.md):
+#      - add the /.skill-manager/ + constituents/*/.skill-manager/ ignore rules
+#        to the ROOT .gitignore, and prove them with `git check-ignore -v`
+#      - write skill-project.toml declaring the units this repo's agents need
+#      - copy scripts/agent-home.sh into the repo root, run it once
+$S/bootstrap-home.sh --root .
 ```
 
 ## What each step guarantees
@@ -64,6 +72,10 @@ git add -A && git commit -m "scaffold compositions + markers"
 - **Ignoring artifacts inside a constituent.** Put path-scoped rules in the root
   `.gitignore`, not a file inside the constituent (it would be wiped by
   `reset --hard`). See `references/git-model.md`.
+- **Assuming a root ignore rule wins.** A constituent's own `.gitignore` is more
+  specific, so a negated rule in it beats the root rule — that is how a 1.0 GB
+  vendored IntelliJ distribution stayed visible to the parent. Always confirm
+  with `git check-ignore -v <path>` and read which file it names.
 
 ## Adding a constituent later
 

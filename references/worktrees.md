@@ -23,8 +23,14 @@ S=<this-skill>/scripts
 # 1. Start the change. Requires a clean parent tree.
 $S/new-change.sh TICKET-123
 #    -> creates ../<repo>-TICKET-123 on branch feature/TICKET-123 (plain files)
+#    -> and gives it its OWN skill-manager home before returning
 
 WT=../<repo>-TICKET-123
+
+# 1b. Launch agents through the worktree's own home, not the global one:
+$WT/.skill-manager/bin/launch/claude
+#    See references/skill-homes.md. Nothing to export; the shim applies the
+#    whole launch contract.
 
 # 2. Make the change across constituents in the worktree. Use the composed
 #    skills here: write/adjust tla-spec-dev specs, spec unit tests, and
@@ -64,3 +70,10 @@ Create the ticket in your tracker first; `[integration].tracker` in
 - **Do not run git inside the worktree's constituent directories** — there is no
   `.git` there, and you do not want one. Constituent-level git happens later in
   the main tree during propagation.
+- **The worktree's home dies with the worktree.** `git worktree remove` deletes
+  `<wt>/.skill-manager` too, including any skill edit an agent made in it that
+  was never pushed back. Push back first — that is a different flow from
+  `propagate.sh`; see `references/skill-homes.md`.
+- **`--no-home` exists but costs you the isolation.** A worktree created with it
+  runs agents against the global home, which is what the per-worktree home is
+  there to prevent. Use it only for a worktree no agent will run in.
