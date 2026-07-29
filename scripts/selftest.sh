@@ -161,6 +161,30 @@ check "$(yesno absent "$WT_HOME/skills/global-only-unit")" \
   "the_worktree_home_does_not_carry_the_global_homes_unit" \
   "$WT_HOME/skills/global-only-unit exists — cloned from $GLOBAL_HOME"
 
+# The closing caveat describes what THIS run did. Both halves, because the #38
+# defect was that it described a clone on a run that had not cloned: gated on
+# `bootstrapped`, which stays 0 on the `--force` path. A one-sided check would
+# pass against a banner that always prints AND against one that never does.
+#
+# Asserted on the printed BYTES rather than on an exit code — both invocations
+# below exit 0, and the whole defect is what they said while doing so.
+check "$(yesno command grep -q 'The home is a clone' "$SCRATCH/bootstrap.log")" \
+  "a_run_that_cloned_says_which_directories_were_skipped" \
+  "a real clone did not print the skipped-directory caveat"
+
+FORCE_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT" --force \
+  > "$SCRATCH/bootstrap-force.log" 2>&1 || FORCE_RC=$?
+check "$(yesno absent_pattern 'The home is a clone' "$SCRATCH/bootstrap-force.log")" \
+  "a_force_rerun_does_not_claim_a_clone_it_did_not_do" \
+  "--force printed the clone caveat without cloning (rc=$FORCE_RC)"
+check "$(yesno command grep -q 'not re-cloning' "$SCRATCH/bootstrap-force.log")" \
+  "a_force_rerun_says_what_it_did_instead" \
+  "--force did not say it was re-running rather than re-cloning (rc=$FORCE_RC)"
+check "$(yesno exists "$WT_HOME/skills/project-only-unit")" \
+  "a_force_rerun_leaves_the_existing_home_intact" \
+  "$WT_HOME/skills/project-only-unit vanished across --force (rc=$FORCE_RC)"
+
 # --------------------------------------------- 2. where close-out reconciles to
 
 step "close-change.sh reconciles into that SAME home"

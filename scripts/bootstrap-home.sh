@@ -346,6 +346,15 @@ EOF
 }
 
 bootstrapped=0; frozen_skip=0
+# Whether THIS run actually ran `home clone`. Distinct from `bootstrapped`, and
+# the distinction is the #38 defect: the closing caveat about skipped directories
+# was gated on `bootstrapped`, which stays 0 on the `--force` path — so
+# `--force` against an existing non-empty home printed "The home is a clone:
+# cache/, tmp/, logs/, venvs/, tools/ and npm/ were not copied" about a clone
+# that had not happened, and named a `sync --force-scripts` remedy for shims
+# that were never broken. `--force` is exactly the invocation the onboarding
+# recipe uses, so it was the common case rather than the edge one.
+cloned=0
 if [ -e "$STORE/home.runtime.json" ]; then
   existing="$(home_policy)"
   if [ "$existing" = "frozen" ]; then
@@ -394,6 +403,7 @@ if [ "$bootstrapped" = 0 ]; then
   if [ "$need_clone" = 1 ]; then
     "$CLI" home clone --from "$SOURCE" --to "$STORE" \
       || die "home clone failed; $STORE is not usable"
+    cloned=1
   fi
 
   # 2. From here on, every command binds to the clone.
@@ -545,8 +555,9 @@ or put the shims on PATH for this shell:
   eval "\$($SCRIPT_DIR/bootstrap-home.sh --root $ROOT --print-env)"
 EOF
 
-# Only after a clone: the skipped-directory caveat is about what just happened.
-[ "$QUIET" = 1 ] || [ "$bootstrapped" = 1 ] || cat >&2 <<EOF
+# Only after a clone actually ran: the caveat is about what just happened, so it
+# is gated on `cloned`, not on `bootstrapped`. See the note beside `cloned=0`.
+[ "$QUIET" = 1 ] || [ "$cloned" = 0 ] || cat >&2 <<EOF
 
 The home is a clone: cache/, tmp/, logs/, venvs/, tools/ and npm/ were not
 copied. Any CLI shim whose target lived under one of those is reported by the
