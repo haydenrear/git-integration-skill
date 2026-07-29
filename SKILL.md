@@ -136,8 +136,11 @@ git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the int
 # --- close ---
 $S/close-change.sh TICKET-123                      # gate on `home close-out`, THEN remove the worktree
 #   refuses (exit 4) while the worktree's home still holds unit work, naming
-#   each blocker and the command that clears it, with the resolved CLI path
-#   rather than a bare `skill-manager`. --force discards deliberately.
+#   each blocker and the command that clears it. HomeCloseOut names a resolved
+#   CLI path in every remedy (never a bare `skill-manager`, which on a machine
+#   with an older release on PATH exits 2); this script only passes it the build
+#   it verified. --force discards deliberately. --dry-run works from inside the
+#   worktree; a real removal from inside it refuses.
 #   --into defaults to the project home the worktree was cloned FROM, wherever
 #   you are standing when you run it.
 #   Use this instead of a bare `git worktree remove`, which deletes the home

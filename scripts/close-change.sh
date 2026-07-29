@@ -118,14 +118,6 @@ WT="$(cd "$WT" && pwd -P)"
 
 [ "$WT" = "$ROOT" ] && die "refusing to remove the repo's main working tree ($ROOT)"
 
-# Removing the directory the caller is standing in leaves the shell in a path
-# that no longer exists, and `git worktree remove --force` will do it. Refuse
-# where the operator can still read the message.
-case "$INVOKED_FROM/" in
-  "$WT"/*) die "refusing to remove $WT while you are standing in it
-  cd elsewhere (e.g. $ROOT) and re-run." ;;
-esac
-
 # It must actually be a worktree of THIS repo, checked before anything else so
 # a mistyped path cannot reach `git worktree remove`. Compared by PHYSICAL path
 # so /tmp vs /private/tmp (or any symlinked parent) cannot make a real worktree
@@ -237,7 +229,23 @@ elif [ ! -d "$INTO" ]; then
 else
   info "cli:       $CLI"
   step "Gate: does this worktree still hold work?"
-  VERDICT="$("$CLI" home close-out --home "$STORE" --into "$INTO" --json 2>/dev/null)" && rc=0 || rc=$?
+  # SKILL_MANAGER_CLI is exported into the child on purpose, and it is the whole
+  # of this script's contribution to the remedy strings. HomeCloseOut names the
+  # CLI in every remedy through HomeDescriptor.resolveCli, whose first rule is
+  # this variable; pick_cli above has ALREADY established which build
+  # understands this home (by reading `home close-out --help` for `--into`,
+  # because the released 0.19.2 answers unknown subcommands with top-level usage
+  # and exit 0), so passing that answer in is how the gate prints a command the
+  # operator can actually run.
+  #
+  # This replaced a regex substitution over the rendered remedy, which was the
+  # wrong shape twice over: it fixed only the --json consumer and left
+  # `home close-out`'s own human output printing the un-runnable spelling, and
+  # its token boundary matched inside `skill-manager.toml` — the most common
+  # conflicted file there is — rewriting the operator's conflict list into a
+  # path in a different repository.
+  VERDICT="$(SKILL_MANAGER_CLI="$CLI" "$CLI" home close-out \
+      --home "$STORE" --into "$INTO" --json 2>/dev/null)" && rc=0 || rc=$?
 
   if [ -z "$VERDICT" ]; then
     refuse "\`home close-out\` produced no verdict (exit $rc), so nothing was established."
@@ -246,24 +254,13 @@ else
     # the remedy strings, and a second opinion here is a second thing to keep
     # in step with HomeCloseOut.
     #
-    # One rewrite, and it is not cosmetic. HomeCloseOut spells every remedy
-    # `skill-manager ...`, and a bare `skill-manager` on this machine's PATH is
-    # the released 0.19.2 — no `home` subcommand at all, so the remedy an
-    # operator copy-pastes exits 2 while the gate that printed it went on
-    # working. pick_cli above already resolved WHICH build understands this
-    # home; substituting that answer is reusing it rather than inventing a
-    # second one. Only the standalone token is replaced, so a unit NAMED
-    # skill-manager-skill keeps its name.
+    # It renders the remedy VERBATIM. The CLI owns that string and now names
+    # itself in it (HomeCloseOut.cliInvocation); a second opinion here was a
+    # regex over someone else's sentence, and it corrupted the one thing a
+    # remedy tail carries — the conflicted-file list, where `skill-manager.toml`
+    # matched the token and became a path in another repository.
     printf '%s' "$VERDICT" | "$PY" -c '
-import json, re, shlex, sys
-
-cli = shlex.quote(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else None
-TOKEN = re.compile(r"(?<![\w./-])skill-manager(?![\w-])")
-
-def remedy(text):
-    # A function replacement, not a string one: re treats backslashes in a
-    # replacement STRING as escapes, and a home path is not a regex.
-    return TOKEN.sub(lambda m: cli, text) if cli else text
+import json, sys
 
 try:
     v = json.load(sys.stdin)
@@ -280,8 +277,8 @@ for b in v.get("blockers", []):
     print("  BLOCKED  %s (%s)" % (b["unit"], b["status"]))
     for c in b.get("conflicts", []):
         print("      conflict  %s" % c)
-    print("      run: %s" % remedy(b["remedy"]))
-' "$CLI" >&2
+    print("      run: %s" % b["remedy"])
+' >&2
 
     if [ "$rc" != 0 ]; then
       # Only reachable with --force; refuse() exits otherwise. Do NOT fall
@@ -306,6 +303,20 @@ if [ "$DRY_RUN" = 1 ]; then
   info "would run: git -C \"$ROOT\" worktree remove \"$WT\""
   exit 0
 fi
+
+# Removing the directory the caller is standing in leaves the shell in a path
+# that no longer exists, and `git worktree remove --force` will do it. Refuse
+# where the operator can still read the message.
+#
+# BELOW the dry-run exit, deliberately. A dry run removes nothing, so it is the
+# safest thing an operator can do and the most natural one to run from inside
+# the worktree they are asking about; refusing it there made the read-only
+# gesture the one that was blocked while the destructive one was still a cd
+# away.
+case "$INVOKED_FROM/" in
+  "$WT"/*) die "refusing to remove $WT while you are standing in it
+  cd elsewhere (e.g. $ROOT) and re-run, or use --dry-run to just ask." ;;
+esac
 
 step "Removing the worktree"
 # --force here is about git's own refusal over the ignored home and any build

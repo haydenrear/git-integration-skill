@@ -71,6 +71,7 @@ contains()  { case "$2" in *"$1"*) return 0 ;; esac; return 1; }
 ends_with() { case "$2" in *"$1") return 0 ;; esac; return 1; }
 exists()    { [ -e "$1" ]; }
 absent_pattern() { ! command grep -q "$1" "$2"; }
+absent_substring() { ! contains "$1" "$2"; }
 absent()    { [ ! -e "$1" ]; }
 executable() { [ -n "${1:-}" ] && [ -f "$1" ] && [ -x "$1" ]; }
 yesno()     { if "$@"; then printf 1; else printf 0; fi; }
@@ -183,6 +184,44 @@ check "$(yesno absent_pattern 'BLOCKED' "$SCRATCH/closeout.log")" \
   "a_freshly_bootstrapped_worktree_is_blocked_by_nothing" \
   "$(command grep -c 'BLOCKED' "$SCRATCH/closeout.log" || true) blockers before any work existed"
 
+# --------------------------------------- 2b. which worktree a TICKET resolves to
+
+step "A ticket resolves to the same worktree from anywhere in the repo"
+
+# The destination check above cannot see this. `project_home` derives from
+# `git worktree list`, not from $PWD, so reverting close-change.sh's ROOT alone
+# leaves the `into:` line correct and every assertion green -- the two edits
+# were only jointly observable, which is a finding about the test, not about the
+# code. THIS is the one that fails on the ROOT site alone: ticket_worktree_path
+# is `<parent>/<basename $ROOT>-<TICKET>`, so with $ROOT resolved from $PWD the
+# ticket T1 named `proj-T2-T1` from inside the T2 worktree and the script died
+# on a path that never existed.
+( cd "$WT2" && bare bash "$SCRIPT_DIR/close-change.sh" T1 --dry-run ) \
+  > "$SCRATCH/byticket.log" 2>&1 || true
+WT_LINE="$(command grep -m1 '^  worktree:' "$SCRATCH/byticket.log" || true)"
+check "$(yesno ends_with "$WT" "$WT_LINE")" \
+  "a_ticket_resolves_to_the_same_worktree_from_a_sibling_worktree" \
+  "expected 'worktree: $WT', got '${WT_LINE:-<no worktree: line — the ticket path did not resolve>}'"
+
+# ------------------------------------------- 2c. the read-only gesture is allowed
+
+step "From inside the worktree: --dry-run answers, removal refuses"
+
+( cd "$WT" && bare bash "$SCRIPT_DIR/close-change.sh" "$WT" --dry-run ) \
+  > "$SCRATCH/inside-dry.log" 2>&1 || true
+check "$(yesno command grep -q 'Dry run — nothing removed' "$SCRATCH/inside-dry.log")" \
+  "a_dry_run_from_inside_the_worktree_is_answered_not_refused" \
+  "a dry run removes nothing and is the safest thing to ask; see $SCRATCH/inside-dry.log"
+
+( cd "$WT" && bare bash "$SCRIPT_DIR/close-change.sh" "$WT" ) \
+  > "$SCRATCH/inside-real.log" 2>&1 || true
+check "$(yesno exists "$WT/.git")" \
+  "a_removal_from_inside_the_worktree_removes_nothing" \
+  "$WT was removed out from under the caller"
+check "$(yesno command grep -q 'standing in it' "$SCRATCH/inside-real.log")" \
+  "a_removal_from_inside_the_worktree_says_why_it_refused" \
+  "no 'standing in it' refusal; see $SCRATCH/inside-real.log"
+
 # ------------------------------------------------- 3. the remedy an operator runs
 
 step "A printed remedy names a CLI that exists"
@@ -203,6 +242,17 @@ version = "0.1.0"
 description = "work that only exists in the worktree home"
 EOF
 
+# And a CONFLICTED unit, because a conflict is the only status whose remedy has
+# a TAIL: `--merge  (then resolve: <files>)`. Both homes edit the same two files
+# of the unit the clone gave them, so the merge cannot pick a side. The manifest
+# is edited deliberately -- `skill-manager.toml` is in every unit there is, so a
+# manifest conflict is the most likely remedy this gate will ever print, and it
+# is the string a token substitution over the remedy corrupts.
+printf 'WORKTREE EDIT\n' >> "$WT_HOME/skills/project-only-unit/SKILL.md"
+printf '# worktree edit\n' >> "$WT_HOME/skills/project-only-unit/skill-manager.toml"
+printf 'PROJECT EDIT\n' >> "$PROJ_HOME/skills/project-only-unit/SKILL.md"
+printf '# project edit\n' >> "$PROJ_HOME/skills/project-only-unit/skill-manager.toml"
+
 ( cd "$WT2" && bare bash "$SCRIPT_DIR/close-change.sh" "$WT" --dry-run ) \
   > "$SCRATCH/blocked.log" 2>&1 || true
 
@@ -215,8 +265,26 @@ check "$(yesno executable "$REMEDY_CMD")" \
   "the_printed_remedy_names_an_executable_that_exists" \
   "remedy command '${REMEDY_CMD:-<none>}' is not an executable file — a bare \`skill-manager\` here is the stale PATH build, which exits 2"
 check "$(yesno contains "home sync --from " "$REMEDY")" \
-  "the_rewritten_remedy_is_still_the_command_the_gate_ran" \
+  "the_remedy_is_still_the_command_the_gate_ran" \
   "remedy lost its subcommand: '$REMEDY'"
+
+# The TAIL. Both assertions above read only the HEAD of the command -- the first
+# token, and the subcommand right after it -- which is the one-sided shape: a
+# remedy whose conflicted-file list had been rewritten into paths in another
+# repository would satisfy both of them. Measured, that is exactly what a token
+# substitution over the remedy did to `skill-manager.toml`, the most common
+# conflicted file there is.
+CONFLICT_REMEDY="$(command grep -m1 'then resolve: ' "$SCRATCH/blocked.log" || true)"
+CONFLICT_TAIL="${CONFLICT_REMEDY#*then resolve: }"
+check "$(yesno test -n "$CONFLICT_REMEDY")" \
+  "the_gate_reports_a_conflicted_unit_with_the_files_to_resolve" \
+  "no 'then resolve:' remedy was printed; see $SCRATCH/blocked.log"
+check "$(yesno contains "skill-manager.toml" "$CONFLICT_TAIL")" \
+  "the_remedy_tail_names_the_conflicted_manifest" \
+  "expected skill-manager.toml among the conflicts, got '${CONFLICT_TAIL:-<none>}'"
+check "$(yesno absent_substring "/skill-manager.toml" "$CONFLICT_TAIL")" \
+  "the_remedy_tail_names_conflicts_by_their_in_unit_path_not_an_absolute_one" \
+  "a conflicted file became an absolute path — the operator is pointed at the wrong file: '$CONFLICT_TAIL'"
 
 # ------------------------------------------------------------- 4. the refusals
 
@@ -245,6 +313,39 @@ check "$(yesno absent "$WT3/.skill-manager")" \
 check "$(yesno absent "$NOHOME/.skill-manager")" \
   "the_refusal_does_not_scaffold_a_home_at_the_project_either" \
   "$NOHOME/.skill-manager was created by a run that refused"
+
+# ------------------------------------- 5. a refused bootstrap leaves no residue
+
+step "new-change.sh rolls back a worktree whose home could not be created"
+
+# The refusal above is correct; the state it USED to leave was not. The worktree
+# and its branch survived, so `new-change.sh <TICKET>` then died with "worktree
+# path already exists", and the trailing text told the operator to re-run the
+# bootstrap against the WORKTREE -- which refuses identically, because the cause
+# is that the PROJECT has no home. The last thing an operator reads has to be
+# the thing that works, and this fires on 17 of the 24 constituents in the
+# integration repo this ships with.
+NC_WT="$SCRATCH/nohome-T9"
+( cd "$NOHOME" && bare bash "$SCRIPT_DIR/new-change.sh" T9 ) \
+  > "$SCRATCH/newchange.log" 2>&1 || true
+
+git -C "$NOHOME" branch --format='%(refname:short)' > "$SCRATCH/branches.txt" 2>/dev/null || true
+
+check "$(yesno absent "$NC_WT")" \
+  "a_worktree_whose_home_could_not_be_created_is_rolled_back" \
+  "$NC_WT survives a failed new-change.sh; the next run dies on 'already exists'"
+# Non-vacuity for the check below: an empty or missing branches.txt would make
+# "feature/T9 is absent" true for the wrong reason. This is the §7.4 shape and it
+# costs one line to close.
+check "$(yesno command grep -qx 'main' "$SCRATCH/branches.txt")" \
+  "the_branch_listing_that_the_next_check_reads_is_real" \
+  "branches.txt does not list main, so 'feature/T9 is absent' would prove nothing"
+check "$(yesno absent_pattern 'feature/T9' "$SCRATCH/branches.txt")" \
+  "the_branch_of_a_rolled_back_worktree_is_deleted_too" \
+  "feature/T9 is still a branch of $NOHOME"
+check "$(yesno contains "bootstrap-home.sh --root \"$NOHOME\"" "$(cat "$SCRATCH/newchange.log")")" \
+  "the_failure_names_a_remedy_that_actually_works" \
+  "the trailing remedy does not name the PROJECT root; see $SCRATCH/newchange.log"
 
 # ------------------------------------------------------------------- verdict
 

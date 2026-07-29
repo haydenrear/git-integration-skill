@@ -95,10 +95,19 @@ Two things therefore **refuse** rather than fall back:
   project;
 - an explicit `--source` that is not the project home.
 
+When the bootstrap refuses, `new-change.sh` **rolls the worktree and its branch
+back**, so the operator's next command is the one the message names rather than
+`worktree path already exists`.
+
 `scripts/selftest.sh` proves both directions on a disposable fixture, from a
 bare shell, against a decoy global home: it asserts by **unit name present /
 absent** which home the worktree's copy came from, so a check that only looked
-for the right unit could not pass a home that carried both.
+for the right unit could not pass a home that carried both. It also pins the
+things that have no other coverage — that a ticket resolves to the same worktree
+from a sibling worktree, that `--dry-run` from *inside* a worktree is answered
+while a real removal from inside it refuses, that a refused bootstrap leaves no
+worktree or branch behind, and that a remedy's conflicted-file list is not
+mangled.
 
 ## Which `skill-manager` a home uses
 
@@ -244,10 +253,23 @@ change the answer. It used to be `<checkout_root>/.skill-manager`, i.e. `$PWD`'s
 nearest git toplevel, which from inside a sibling worktree named *that*
 worktree's home.
 
-The remedies printed below are rewritten to name the **resolved CLI**, not a
-bare `skill-manager`: `pick_cli` has already established which build understands
-this home, and a bare `skill-manager` on a machine with an older release on PATH
-exits 2 for the operator who copy-pastes it.
+Every remedy names a **resolved CLI path**, not a bare `skill-manager`. A bare
+`skill-manager` on a machine with an older release first on PATH exits 2 for the
+operator who copy-pastes it, and that is the machine this was found on.
+
+The substitution happens in **one** place — `HomeCloseOut` builds the string and
+names the CLI through `HomeDescriptor.resolveCli`, so `--json` and
+`home close-out`'s own human output say the same thing. `close-change.sh`'s only
+contribution is to export `SKILL_MANAGER_CLI` (which `resolveCli` honours first)
+for the gate invocation, passing along the build whose capability `pick_cli` has
+already probed. It renders the remedy verbatim.
+
+It used to rewrite the string with a regex instead, and that was wrong twice: it
+fixed only the `--json` consumer, and its token boundary matched inside
+`skill-manager.toml` — the manifest every unit has, so the most likely conflicted
+file there is — turning the operator's conflict list into a path in a different
+repository. `scripts/selftest.sh` now asserts the remedy's **tail**, not just its
+first token.
 
 and **refuses to remove the worktree** (exit 4) while that verdict is non-zero,
 printing every blocking unit and the exact command that clears it. Run the
