@@ -62,7 +62,10 @@ usage: close-change.sh <TICKET|WORKTREE-PATH> [--into HOME] [--force] [--dry-run
                    the same path new-change.sh creates. A path may be given
                    instead.
   --into HOME      Project home the worktree's work must reach first.
-                   Default: <repo-root>/.skill-manager
+                   Default: the project home the worktree's own home was cloned
+                   FROM — <main working tree>/.skill-manager. bootstrap-home.sh
+                   derives the clone source from the same function, so the two
+                   agree by construction rather than by exported variable.
   --force          Remove even if the gate refuses. The gate still runs and its
                    blockers are still printed; the work is DISCARDED.
   --dry-run        Run the gate and report; remove nothing.
@@ -92,7 +95,17 @@ done
 # the worktree in the wrong repo's `worktree list` and refuse a perfectly real
 # one. The two scripts must answer this identically or close-change.sh cannot
 # close what new-change.sh opened.
-ROOT="$(checkout_root)"; cd "$ROOT"
+#
+# Then up to that repo's MAIN working tree. checkout_root() answers $PWD, and
+# $PWD may itself be a worktree — from inside one, `ticket_worktree_path`
+# produced `<repo>-T1-T2` and `--into` named a SIBLING WORKTREE's home instead
+# of the project's. The project is where new-change.sh branched from and where
+# the worktree's home was cloned from, and it is the same whichever worktree the
+# operator happens to be standing in.
+INVOKED_FROM="$(pwd -P)"     # physical: /tmp vs /private/tmp must not decide this
+ROOT="$(checkout_root)"
+ROOT="$(main_checkout_root "$ROOT")" || die "cannot resolve the main working tree for $ROOT"
+cd "$ROOT"
 
 # A path if it looks like one or exists; otherwise the new-change.sh
 # convention, computed by the SAME helper so the two cannot drift apart.
@@ -103,7 +116,15 @@ esac
 [ -d "$WT" ] || die "not a directory: $WT"
 WT="$(cd "$WT" && pwd -P)"
 
-[ "$WT" = "$ROOT" ] && die "refusing to remove the repo root itself ($ROOT)"
+[ "$WT" = "$ROOT" ] && die "refusing to remove the repo's main working tree ($ROOT)"
+
+# Removing the directory the caller is standing in leaves the shell in a path
+# that no longer exists, and `git worktree remove --force` will do it. Refuse
+# where the operator can still read the message.
+case "$INVOKED_FROM/" in
+  "$WT"/*) die "refusing to remove $WT while you are standing in it
+  cd elsewhere (e.g. $ROOT) and re-run." ;;
+esac
 
 # It must actually be a worktree of THIS repo, checked before anything else so
 # a mistyped path cannot reach `git worktree remove`. Compared by PHYSICAL path
@@ -125,7 +146,19 @@ if ! is_worktree_of_root; then
 fi
 
 STORE="$WT/.skill-manager"
-[ -n "$INTO" ] || INTO="$ROOT/.skill-manager"
+
+# The destination is the PROJECT home — the main working tree's — and it is
+# derived from the same lib.sh function bootstrap-home.sh clones the worktree
+# home from. That is issue #50: the two used to answer separately, bootstrap
+# from `${SKILL_MANAGER_HOME:-$HOME/.skill-manager}` and this from
+# `$ROOT/.skill-manager`, and from a bare shell they named different homes.
+#
+# `$ROOT/.skill-manager` was also wrong in a second, quieter way: $ROOT is
+# checkout_root(), the nearest git toplevel to $PWD, so running this from
+# INSIDE another worktree of the same repo aimed --into at THAT worktree's
+# home. project_home answers the main working tree wherever it is run.
+[ -n "$INTO" ] || INTO="$(project_home "$ROOT")" \
+  || die "cannot resolve the project home for $ROOT — pass --into <home>"
 
 step "Closing out $WT"
 info "worktree:  $WT"
@@ -212,8 +245,26 @@ else
     # Render blockers from the JSON rather than re-deriving them: the CLI owns
     # the remedy strings, and a second opinion here is a second thing to keep
     # in step with HomeCloseOut.
+    #
+    # One rewrite, and it is not cosmetic. HomeCloseOut spells every remedy
+    # `skill-manager ...`, and a bare `skill-manager` on this machine's PATH is
+    # the released 0.19.2 — no `home` subcommand at all, so the remedy an
+    # operator copy-pastes exits 2 while the gate that printed it went on
+    # working. pick_cli above already resolved WHICH build understands this
+    # home; substituting that answer is reusing it rather than inventing a
+    # second one. Only the standalone token is replaced, so a unit NAMED
+    # skill-manager-skill keeps its name.
     printf '%s' "$VERDICT" | "$PY" -c '
-import json, sys
+import json, re, shlex, sys
+
+cli = shlex.quote(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else None
+TOKEN = re.compile(r"(?<![\w./-])skill-manager(?![\w-])")
+
+def remedy(text):
+    # A function replacement, not a string one: re treats backslashes in a
+    # replacement STRING as escapes, and a home path is not a regex.
+    return TOKEN.sub(lambda m: cli, text) if cli else text
+
 try:
     v = json.load(sys.stdin)
 except Exception as exc:
@@ -229,8 +280,8 @@ for b in v.get("blockers", []):
     print("  BLOCKED  %s (%s)" % (b["unit"], b["status"]))
     for c in b.get("conflicts", []):
         print("      conflict  %s" % c)
-    print("      run: %s" % b["remedy"])
-' >&2
+    print("      run: %s" % remedy(b["remedy"]))
+' "$CLI" >&2
 
     if [ "$rc" != 0 ]; then
       # Only reachable with --force; refuse() exits otherwise. Do NOT fall

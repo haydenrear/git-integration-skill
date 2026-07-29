@@ -91,7 +91,7 @@ constituent would clobber it.
 | Task | Read | Scripts |
 |---|---|---|
 | Create / onboard an integration repo | `references/onboarding.md` | `scripts/init-integration.sh`, `scripts/add-constituent.sh`, `scripts/finalize-constituents.sh`, `scripts/verify.sh` |
-| Give a checkout its own skill-manager home | `references/skill-homes.md` | `scripts/bootstrap-home.sh` |
+| Give a checkout its own skill-manager home | `references/skill-homes.md` | `scripts/bootstrap-home.sh`, `scripts/selftest.sh` |
 | Make a ticketed multi-repo change | `references/worktrees.md` | `scripts/new-change.sh`, `scripts/close-change.sh` |
 | Fan a merged change out to constituents | `references/propagation.md` | `scripts/propagate.sh` |
 | Scaffold spec / test-graph / deploy | `references/composition.md` | (invokes the composed skills) |
@@ -116,6 +116,10 @@ $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-m
 #   --root defaults to the nearest git toplevel — inside a constituent that is
 #   the CONSTITUENT, not the integration parent. Re-running also re-pins
 #   <home>/bin/cli/skill-manager to the build it resolved.
+#   A WORKTREE clones from its project home (<main working tree>/.skill-manager),
+#   never from $SKILL_MANAGER_HOME, because that is the home close-change.sh
+#   reconciles it back into. No project home yet -> it refuses.
+$S/selftest.sh                                     # prove that pair on a disposable fixture, bare shell
 
 # --- change ---
 $S/new-change.sh TICKET-123                        # worktree on feature/TICKET-123
@@ -132,7 +136,10 @@ git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the int
 # --- close ---
 $S/close-change.sh TICKET-123                      # gate on `home close-out`, THEN remove the worktree
 #   refuses (exit 4) while the worktree's home still holds unit work, naming
-#   each blocker and the command that clears it. --force discards deliberately.
+#   each blocker and the command that clears it, with the resolved CLI path
+#   rather than a bare `skill-manager`. --force discards deliberately.
+#   --into defaults to the project home the worktree was cloned FROM, wherever
+#   you are standing when you run it.
 #   Use this instead of a bare `git worktree remove`, which deletes the home
 #   and any unpushed skill edit in it without a word.
 

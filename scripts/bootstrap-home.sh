@@ -45,8 +45,12 @@ usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
   --root DIR       Checkout to give a home to. Default: the nearest enclosing
                    git toplevel — which inside a constituent is the
                    CONSTITUENT, not the integration repo tracking its files.
-  --source HOME    Home to clone from. Default: $SKILL_MANAGER_HOME, else
-                   ~/.skill-manager. Only ever read.
+  --source HOME    Home to clone from. Only ever read. Default: for a LINKED
+                   WORKTREE, its project home (the main working tree's), which
+                   is the home close-change.sh reconciles it back into; for a
+                   main working tree, $SKILL_MANAGER_HOME, else ~/.skill-manager.
+                   A --source that disagrees with a worktree's project home is
+                   REFUSED, not silently honoured.
   --policy P       Policy to declare on the new home: live (default) or
                    frozen. A home that is ALREADY frozen is never touched.
   --print-env      Print the launch environment as `export` lines and exit.
@@ -91,14 +95,89 @@ heading() { [ "$QUIET" = 1 ] || step "$*"; }
 ROOT="$(cd "$ROOT" && pwd -P)"
 STORE="$ROOT/.skill-manager"
 
-[ -n "$SOURCE" ] || SOURCE="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}"
-# -P so a symlinked source and a symlinked target cannot compare unequal
-# while naming the same directory.
-[ -d "$SOURCE" ] || die "source home does not exist: $SOURCE"
-SOURCE="$(cd "$SOURCE" && pwd -P)"
-
 GLOBAL_HOME="$HOME/.skill-manager"
 [ -d "$GLOBAL_HOME" ] && GLOBAL_HOME="$(cd "$GLOBAL_HOME" && pwd -P)"
+
+# ------------------------------------------------- which home this clones FROM
+#
+# Issue #50. The source and the close-out destination must be THE SAME HOME BY
+# CONSTRUCTION, and the only thing both scripts can derive it from without
+# consulting the operator's environment is the checkout itself. So:
+#
+#   a LINKED WORKTREE clones from its PROJECT home — <main working tree>/.skill-manager,
+#   which is exactly what close-change.sh reconciles it back into (project_home,
+#   one definition, shared).
+#
+#   a MAIN working tree clones from $SKILL_MANAGER_HOME, else the global home.
+#   That is the root -> project tier: there is no project above it to inherit.
+#
+# The old default was `${SKILL_MANAGER_HOME:-$HOME/.skill-manager}` for BOTH,
+# and from a bare shell that made a worktree unclosable from birth: it cloned
+# the operator's global home (measured: 845 MB) into the worktree, and
+# `home close-out --into <project>/.skill-manager` then blocked on 17 units
+# before any work existed, printing a remedy that would have synced those 17
+# GLOBAL units into the project home. The launch shims export
+# SKILL_MANAGER_HOME and never saw it; a human running the scripts by hand did.
+PROJECT_HOME=""
+project_home "$ROOT" >/dev/null 2>&1 && PROJECT_HOME="$(project_home "$ROOT")"
+[ -n "$PROJECT_HOME" ] && [ -d "$PROJECT_HOME" ] \
+  && PROJECT_HOME="$(cd "$PROJECT_HOME" && pwd -P)"
+
+IS_WORKTREE=0
+is_linked_worktree "$ROOT" && IS_WORKTREE=1 || true
+
+if [ -n "$SOURCE" ]; then
+  SOURCE_ORIGIN="--source"
+elif [ "$IS_WORKTREE" = 1 ]; then
+  # Refuse rather than fall back to the global home. Falling back is the bug:
+  # it produces a worktree whose home came from a place close-out cannot
+  # reconcile it into, and the failure surfaces at teardown, after the work.
+  [ -d "$PROJECT_HOME" ] || die "this is a worktree of $(dirname "$PROJECT_HOME"), and that
+  checkout has no Skill Manager home at
+    $PROJECT_HOME
+  A worktree home is a copy of its PROJECT home, and close-change.sh reconciles
+  it back into that same path. Cloning from anywhere else — the global home
+  included — makes this worktree unclosable from birth (issue #50).
+  Give the project its home first, then re-run:
+    $SCRIPT_DIR/bootstrap-home.sh --root '$(dirname "$PROJECT_HOME")'
+  or name a source deliberately with --source."
+  SOURCE="$PROJECT_HOME"
+  SOURCE_ORIGIN="the project home of $(dirname "$PROJECT_HOME")"
+else
+  SOURCE="${SKILL_MANAGER_HOME:-$GLOBAL_HOME}"
+  SOURCE_ORIGIN="\$SKILL_MANAGER_HOME"
+  [ -n "${SKILL_MANAGER_HOME:-}" ] || SOURCE_ORIGIN="the global home"
+  # A home cannot be cloned from itself, and this is how it happens by
+  # accident: an agent launched through THIS checkout's shims has
+  # SKILL_MANAGER_HOME already pointing at the home being (re-)bootstrapped, so
+  # `scripts/agent-home.sh` — documented as idempotent — died on the
+  # bootstrap-from-itself guard below. The tier above a project home is the
+  # global home, so say so and use it.
+  if [ -d "$SOURCE" ] && [ "$(cd "$SOURCE" && pwd -P)" = "$STORE" ]; then
+    SOURCE="$GLOBAL_HOME"
+    SOURCE_ORIGIN="the global home (\$SKILL_MANAGER_HOME names this checkout's own home)"
+  fi
+fi
+
+# -P so a symlinked source and a symlinked target cannot compare unequal
+# while naming the same directory.
+[ -d "$SOURCE" ] || die "source home does not exist: $SOURCE ($SOURCE_ORIGIN)"
+SOURCE="$(cd "$SOURCE" && pwd -P)"
+
+# The agreement, asserted. Only reachable via an explicit --source, since the
+# defaults above make the two equal by construction — which is the point: this
+# turns the one remaining way to disagree into a refusal instead of a worktree
+# that cannot be closed.
+if [ "$IS_WORKTREE" = 1 ] && [ -n "$PROJECT_HOME" ] && [ "$SOURCE" != "$PROJECT_HOME" ]; then
+  die "refusing to clone this worktree's home from a home it cannot be closed into.
+    source (--source):  $SOURCE
+    close-out --into:   $PROJECT_HOME
+  close-change.sh reconciles <worktree>/.skill-manager INTO the project home, so
+  a home cloned from anywhere else arrives holding units that home never had —
+  every one of them a blocker at teardown (issue #50). Drop --source to use the
+  project home, or bootstrap the project home from $SOURCE first so the two
+  agree."
+fi
 
 # The guard. A bootstrap that can target the operator's own home is not a
 # bootstrap, it is the bug — so the refusals come before anything is read,
@@ -288,8 +367,12 @@ fi
 
 if [ "$bootstrapped" = 0 ]; then
   heading "Bootstrapping a Skill Manager home for $ROOT"
-  say "source:    $SOURCE"
+  say "source:    $SOURCE  ($SOURCE_ORIGIN)"
   say "cli:       $CLI"
+  # Printed for a worktree because it is the fact the operator cannot otherwise
+  # see, and the one #50 got wrong: this home will have to reconcile back into
+  # exactly the home it came from.
+  [ "$IS_WORKTREE" = 1 ] && say "close-out into: $PROJECT_HOME  (same home — issue #50)" || true
 
   need_clone=1
   if [ -e "$STORE" ]; then

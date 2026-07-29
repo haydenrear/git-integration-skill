@@ -67,6 +67,39 @@ applies to *content* — a change to a leaf that the nested parent also contains
 starts in the leaf, not in the duplicated nested path — and having a home per
 checkout does not change that ordering at all.
 
+## Which home a bootstrap clones FROM — and why it is not a choice
+
+A worktree home and the project home it will be reconciled back into must be
+**the same pair by construction**. `bootstrap-home.sh` and `close-change.sh`
+both derive it from the checkout, through one function (`project_home` in
+`lib.sh`):
+
+| Checkout being bootstrapped | Cloned from | `close-change.sh --into` |
+|---|---|---|
+| A **linked worktree** | its project home — `<main working tree>/.skill-manager` | the same path |
+| A **main working tree** | `$SKILL_MANAGER_HOME`, else `~/.skill-manager` | n/a — nothing closes it out |
+
+`$SKILL_MANAGER_HOME` is **not** consulted for a worktree, deliberately. It used
+to be the default for both tiers while `close-change.sh` defaulted `--into` to
+`<repo-root>/.skill-manager`, and from a **bare shell** those name different
+homes: measured, bootstrap cloned the operator's 845 MB global home into the
+worktree and `home close-out` then blocked on **17 units before any work
+existed**, printing a remedy that would have synced those global units *into*
+the project home. The launch shims export `SKILL_MANAGER_HOME` and so never met
+it; a human running the scripts by hand did (issue #50).
+
+Two things therefore **refuse** rather than fall back:
+
+- a worktree whose project has **no home yet** — bootstrap it at the project
+  first, because a home cloned from anywhere else cannot be closed into the
+  project;
+- an explicit `--source` that is not the project home.
+
+`scripts/selftest.sh` proves both directions on a disposable fixture, from a
+bare shell, against a decoy global home: it asserts by **unit name present /
+absent** which home the worktree's copy came from, so a check that only looked
+for the right unit could not pass a home that carried both.
+
 ## Which `skill-manager` a home uses
 
 `home clone`, `home shims`, `home policy`, `home describe` and `exec` are newer
@@ -201,8 +234,20 @@ git -C <repo-root> worktree list
 
 ```bash
 skill-manager home close-out --home <wt>/.skill-manager \
-                             --into <repo-root>/.skill-manager --json
+                             --into <main-working-tree>/.skill-manager --json
 ```
+
+`--into` is the project home the worktree's own home was **cloned from** — the
+main working tree's, resolved by the same `project_home` helper
+`bootstrap-home.sh` uses, so where the operator happens to be standing cannot
+change the answer. It used to be `<checkout_root>/.skill-manager`, i.e. `$PWD`'s
+nearest git toplevel, which from inside a sibling worktree named *that*
+worktree's home.
+
+The remedies printed below are rewritten to name the **resolved CLI**, not a
+bare `skill-manager`: `pick_cli` has already established which build understands
+this home, and a bare `skill-manager` on a machine with an older release on PATH
+exits 2 for the operator who copy-pastes it.
 
 and **refuses to remove the worktree** (exit 4) while that verdict is non-zero,
 printing every blocking unit and the exact command that clears it. Run the
