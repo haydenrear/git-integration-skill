@@ -1,34 +1,125 @@
 #!/usr/bin/env bash
-# new-change.sh <TICKET> [base-branch] [--no-home]
-# Create a ticketed parent worktree for a cross-repo change. The worktree
-# contains constituent files as PLAIN files (no constituent .git inside it), so
-# you edit across repos freely and commit once to the parent feature branch.
+# new-change.sh <TICKET> [base-branch] [--integration] [--no-home]
 #
-# The worktree also gets its OWN Skill Manager home (bootstrap-home.sh), before
-# this script returns and therefore before any agent can run in it. That is on
+# Create a ticketed worktree, with its own Skill Manager home, for the repo you
+# are standing in.
+#
+# Which repo that is
+# ------------------
+# The nearest enclosing git toplevel — and the script SAYS which one before it
+# does anything. It used to resolve the nearest ancestor holding
+# integration.toml instead (repo_root), which is right for propagate/refresh/
+# verify and wrong here: a constituent has its own real .git, so run from
+# constituents/deploy-helm that answer was the integration PARENT, and the
+# script branched and worktree'd a different repository than the one the
+# operator was standing in — with exit 0 and no warning. Three shapes now, all
+# supported, all announced:
+#
+#   integration   the checkout holds integration.toml. Constituent files are
+#                 plain files in the worktree; propagate.sh fans the change out
+#                 afterwards. (Includes a NESTED integration repo such as
+#                 meta-orchestrator, which is an integration repo in its own
+#                 right and correct to branch here.)
+#   constituent   a git repo living inside an integration repo's tree. Branch
+#                 the constituent itself. Nothing to fan out; the integration
+#                 parent refreshes its snapshot after the change merges.
+#   standalone    an ordinary repo, outside any integration repo.
+#
+# Supporting all three rather than refusing two of them is deliberate. The
+# script's value is that the per-worktree home is not optional; sending an
+# operator to `git worktree add` + `bootstrap-home.sh` by hand makes the home
+# step something to remember again, which is the exact failure the home exists
+# to prevent. What must never happen is a SILENT wrong target, and that is
+# fixed by resolving correctly and printing the answer, not by refusing.
+#
+# Pass --integration to target the enclosing integration repo instead of the
+# constituent you happen to be standing in.
+#
+# Where the worktree goes
+# -----------------------
+# Beside the OUTERMOST enclosing integration repo — see worktree_parent_dir in
+# lib.sh. Unchanged for a top-level repo; for anything inside an integration
+# repo it is the difference between a clean parent and a parent whose
+# `git add -A` stages the worktree as a gitlink.
+#
+# The home
+# --------
+# The worktree gets its OWN Skill Manager home (bootstrap-home.sh) before this
+# script returns, and therefore before any agent can run in it. That is on
 # purpose: an agent that has to remember to export SKILL_MANAGER_HOME will
 # sometimes not, and the failure is invisible — it just edits the operator's
 # global home instead. Pass --no-home (or INTEGRATION_SKIP_HOME=1) only when
 # you know the worktree will never host an agent.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
-TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"
+usage() {
+  cat >&2 <<'EOF'
+usage: new-change.sh <TICKET> [base-branch] [--integration] [--no-home]
+
+  TICKET          Ticket id. The branch is feature/<TICKET>; the worktree is
+                  <repo>-<TICKET>, placed beside the outermost enclosing
+                  integration repo.
+  base-branch     Branch to start from. Default: the checkout's current branch.
+  --integration   Target the enclosing INTEGRATION repo rather than the
+                  constituent you are standing in.
+  --no-home       Skip the per-worktree Skill Manager home. Agents launched in
+                  the worktree then use the operator's global home.
+  -h, --help      This message.
+EOF
+}
+
+TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --no-home) SKIP_HOME=1; shift ;;
-    -h|--help) die "usage: new-change.sh <TICKET> [base-branch] [--no-home]" ;;
-    -*)        die "unknown option: $1" ;;
-    *)         if [ -z "$TICKET" ]; then TICKET="$1"; elif [ -z "$BASE" ]; then BASE="$1";
-               else die "unexpected argument: $1"; fi; shift ;;
+    --no-home)     SKIP_HOME=1; shift ;;
+    --integration) WANT_INTEGRATION=1; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    -*)            usage; die "unknown option: $1" ;;
+    *)             if [ -z "$TICKET" ]; then TICKET="$1"; elif [ -z "$BASE" ]; then BASE="$1";
+                   else die "unexpected argument: $1"; fi; shift ;;
   esac
 done
-[ -n "$TICKET" ] || die "usage: new-change.sh <TICKET> [base-branch] [--no-home]"
+[ -n "$TICKET" ] || { usage; die "a ticket id is required"; }
 
-ROOT="$(repo_root)"; cd "$ROOT"
+# ------------------------------------------------------- which repo, out loud
+
+FROM="$PWD"
+ROOT="$(checkout_root)"
+KIND="$(checkout_kind "$ROOT")"
+INTEGRATION="$(outermost_integration_root "$ROOT")"
+
+if [ "$WANT_INTEGRATION" = 1 ]; then
+  [ -n "$INTEGRATION" ] || die "--integration: no integration.toml in any ancestor of $ROOT"
+  ROOT="$(repo_root)"                 # the NEAREST one: from inside a nested
+  KIND="$(checkout_kind "$ROOT")"     # integration repo that is the right target
+fi
+
+step "Repository for $TICKET"
+info "from:      $FROM"
+info "repo:      $ROOT"
+info "kind:      $KIND"
+case "$KIND" in
+  constituent)
+    # The announcement is the point: this is the case that used to be answered
+    # wrongly, silently, with exit 0.
+    info "note:      a constituent of $INTEGRATION — branching the CONSTITUENT."
+    info "           Pass --integration (or cd there) to branch $INTEGRATION."
+    ;;
+  integration)
+    if [ -n "$INTEGRATION" ] && [ "$INTEGRATION" != "$ROOT" ]; then
+      info "note:      a NESTED integration repo inside $INTEGRATION."
+      info "           Branching it is correct; its worktree is kept OUTSIDE"
+      info "           $INTEGRATION so that tree stays clean."
+    fi
+    ;;
+esac
+
+cd "$ROOT"
 assert_parent_clean "$ROOT"
 
 BRANCH="feature/$TICKET"
-WT="$(dirname "$ROOT")/$(basename "$ROOT")-$TICKET"
+WT="$(ticket_worktree_path "$ROOT" "$TICKET")"
+assert_worktree_outside_integration "$WT"
 [ -e "$WT" ] && die "worktree path already exists: $WT"
 
 : "${BASE:=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD)}"
@@ -38,9 +129,12 @@ git -C "$ROOT" worktree add -q -b "$BRANCH" "$WT" "$BASE"
 info "worktree:  $WT"
 info "branch:    $BRANCH  (base: $BASE)"
 
-# Sanity: no constituent .git leaked into the worktree.
-if find "$WT/constituents" -maxdepth 2 -name .git 2>/dev/null | grep -q .; then
-  info "WARNING: found a .git inside the worktree's constituents — unexpected"
+# Sanity: no constituent .git leaked into an integration worktree. Only an
+# integration repo has constituents, so only it can have this problem.
+if [ "$KIND" = integration ] && [ -d "$WT/constituents" ]; then
+  if command find "$WT/constituents" -maxdepth 2 -name .git 2>/dev/null | command grep -q .; then
+    info "WARNING: found a .git inside the worktree's constituents — unexpected"
+  fi
 fi
 
 # The worktree's own Skill Manager home. One implementation, shared with a
@@ -63,19 +157,36 @@ EOF
   fi
 fi
 
+# ----------------------------------------------------------------- next steps
+
 cat >&2 <<EOF
 
-Edit across constituents in:
+Edit in:
   $WT
 Launch an agent bound to this worktree's own home:
   $WT/.skill-manager/bin/launch/claude
-Then commit to the parent feature branch and bring it back:
+Then commit and bring it back:
   git -C "$WT" add -A && git -C "$WT" commit -m "$TICKET: <what changed>"
   git -C "$ROOT" merge --no-ff "$BRANCH"
 Close the worktree through the gate (NOT a bare "git worktree remove"):
   $SCRIPT_DIR/close-change.sh "$TICKET"
+EOF
+
+if [ "$KIND" = integration ]; then
+  cat >&2 <<EOF
 Finally fan it out to the constituents:
   $SCRIPT_DIR/propagate.sh "$TICKET"
+EOF
+else
+  cat >&2 <<EOF
+
+This is a $KIND worktree, so propagate.sh does NOT apply — there are no
+constituents beneath it to fan out to. Once the change has merged here, refresh
+the integration parent's snapshot of this repo from the parent's own main tree.
+EOF
+fi
+
+cat >&2 <<EOF
 
 Teardown note: the home lives inside the worktree, so removing the worktree
 removes the home, and because the home is gitignored that loss appears in no

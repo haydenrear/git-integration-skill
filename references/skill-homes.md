@@ -54,6 +54,13 @@ hand and you get the part you remembered.
 | A **nested** integration repo (a constituent that is itself one) | At its own root, as its own checkout | `bootstrap-home.sh --root constituents/<nested>` |
 | A constituent you are working in directly | Only if you run an agent from inside it rather than from the parent | `bootstrap-home.sh --root constituents/<name>` |
 
+`bootstrap-home.sh` with no `--root` defaults to the **nearest enclosing git
+toplevel**, which inside `constituents/deploy-helm` is deploy-helm — not the
+integration parent. It used to walk up to `integration.toml` instead, so a bare
+run from a constituent reported on (or created) the *parent's* home; usually the
+parent's home already existed, so the run just said "already bootstrapped" and
+the operator learned nothing.
+
 A nested integration repo is not special-cased: it bootstraps at its own root
 because that is the checkout an agent works in. Leaf-first ordering still
 applies to *content* — a change to a leaf that the nested parent also contains
@@ -65,16 +72,48 @@ checkout does not change that ordering at all.
 `home clone`, `home shims`, `home policy`, `home describe` and `exec` are newer
 than the released CLI, so `bootstrap-home.sh` probes for a build that has them:
 `SKILL_MANAGER_CLI`, then `PATH`, then a `skill-manager` the checkout itself
-ships. If none of them answers `home clone`, it refuses **before** creating
-anything and tells you why — a half-bootstrapped worktree is worse than none.
+ships, then one the **enclosing integration repo** ships. That last entry is
+what lets a constituent home find a capable build at all: bootstrapping
+`constituents/deploy-helm` searched only deploy-helm, which ships no CLI, so it
+either refused or ran on a `SKILL_MANAGER_CLI` the caller exported by hand and
+that nothing recorded. The epic build lives in the parent. If nothing answers
+`home clone`, it refuses **before** creating anything and tells you why — a
+half-bootstrapped worktree is worse than none.
 
-It then writes `<home>/bin/cli/skill-manager` pointing at that build. Both the
-generated shims and `HomeDescriptor.resolveCli` already look there before
-`PATH`, but nothing in skill-manager writes it, and without it a shim falls
-through to whatever `skill-manager` is installed globally. Measured on a
-released 0.19.2: the shim's `skill-manager exec …` printed "Unmatched arguments"
-and **exited 0**, so the launch silently did nothing. Filling that slot is what
-makes a home's shims work with no environment help at all.
+### The pin at `<home>/bin/cli/skill-manager`
+
+That slot decides which build every launch from the home runs. The generated
+launchers and `HomeDescriptor.resolveCli` both consult it before `PATH`, so
+`bootstrap-home.sh` writes an **absolute pin** there naming the build it
+resolved, and re-writes it on every run — including on an already-bootstrapped
+home, without `--force`, because the operator has no way to know the slot is
+wrong. A **frozen** home is never written, here as everywhere else.
+
+Two ways the slot goes wrong, both measured on this repo:
+
+- **Empty.** Every shim falls through to `PATH`, which here is the released
+  0.19.2 — no `exec`, no `home`, no `home close-out`. The shim's
+  `skill-manager exec …` printed "Unmatched arguments" and **exited 0**, so the
+  launch silently did nothing.
+- **Occupied by `home shims`' own generated shim.** That shim resolves via
+  `PATH` by design (it is written to survive the home being copied elsewhere).
+  Newer builds write it during the bootstrap, so a guard of "write the pin only
+  if the slot is empty" saw an occupied slot and skipped — and the home pointed
+  at the released CLI anyway. That is exactly the split observed here: the root
+  home, bootstrapped before `home shims` filled the slot, carries the pin;
+  every constituent home bootstrapped afterwards carried the generated shim.
+
+So the pin is written when the slot is empty **and** in place of the generated
+shim, which is not a tool anyone installed. Anything else in that slot is left
+alone — it could be a real CLI dep. The pin deliberately has **no `PATH`
+fallback**: falling through to an older CLI is the behaviour it exists to
+remove, and that CLI answers unknown subcommands with top-level usage and exit
+0, a downgrade that looks like success. If the pinned build disappears the shim
+exits 127 and says how to re-pin.
+
+Pinning the slot does **not** retire `close-change.sh`'s help-**text** probe.
+`pick_cli` still falls through to `PATH` when the home's own slot cannot be
+used, and `PATH` is still 0.19.2, so the exit-status trap is still reachable.
 
 ## The one ordering rule
 
@@ -198,7 +237,7 @@ nothing to lose.
 | Situation | What close-change.sh does | Why |
 |---|---|---|
 | Worktree has **no home** (`--no-home`) | Removes it, saying the gate was skipped | Absence of a home really is proof there is no home-resident work |
-| **No `skill-manager` with `close-out`** on `SKILL_MANAGER_CLI`, the home's `bin/cli`, the checkout, or PATH | **Refuses** | Absence of the tool is absence of *proof*, which is not the same thing. A gate that opens when it cannot check is not a gate |
+| **No `skill-manager` with `close-out`** on `SKILL_MANAGER_CLI`, the home's `bin/cli`, the checkout, the enclosing integration repo, or PATH | **Refuses** | Absence of the tool is absence of *proof*, which is not the same thing. A gate that opens when it cannot check is not a gate |
 | **Project home missing** (`--into` does not exist) | **Refuses** | The work has nowhere to go and there is nothing to compare against |
 | Gate reports blockers | **Refuses**, printing each remedy | The case the gate exists for |
 
@@ -249,6 +288,16 @@ constituent's own `.gitignore` — that means it already agrees. What must never
 happen is a path reported as not ignored, or a home showing up in
 `git status`: committing a home would put another machine's absolute paths, and
 a copy of every installed unit, into the parent repo.
+
+**These rules cover a home, not a worktree.** A ticket worktree of a nested
+integration repo or of a constituent is a whole checkout, and no ignore rule in
+the parent can safely name it: a glob matching
+`constituents/meta-orchestrator-CO2` also matches `constituents/deploy-helm`.
+Worse, the worktree's `.git` is a file, so a parent `git add -A` stages it as a
+gitlink rather than as files. That is why `new-change.sh` puts such worktrees
+**outside** the outermost integration repo instead — see
+`references/worktrees.md`. Nothing needs adding to the parent's `.gitignore`
+for it.
 
 ## Bootstrapping the repo that ships the bootstrap
 

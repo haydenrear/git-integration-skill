@@ -42,8 +42,9 @@ usage() {
 usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
                          [--print-env] [--force] [--quiet]
 
-  --root DIR       Checkout to give a home to. Default: the enclosing repo
-                   (integration.toml, else the git toplevel).
+  --root DIR       Checkout to give a home to. Default: the nearest enclosing
+                   git toplevel — which inside a constituent is the
+                   CONSTITUENT, not the integration repo tracking its files.
   --source HOME    Home to clone from. Default: $SKILL_MANAGER_HOME, else
                    ~/.skill-manager. Only ever read.
   --policy P       Policy to declare on the new home: live (default) or
@@ -77,7 +78,15 @@ heading() { [ "$QUIET" = 1 ] || step "$*"; }
 
 # ------------------------------------------------------------------ paths
 
-[ -n "$ROOT" ] || ROOT="$(repo_root)"
+# checkout_root, not repo_root: a home belongs to a CHECKOUT, and the checkout
+# you are standing in inside constituents/deploy-helm is deploy-helm. repo_root
+# answers the integration parent there, so a bare `bootstrap-home.sh` run from
+# a constituent used to report on (or create) the parent's home instead — the
+# same silent wrong-target as new-change.sh, one level quieter because the
+# parent's home usually already exists and the run just says "already
+# bootstrapped". Falls back to the integration root when there is no git repo
+# here at all.
+[ -n "$ROOT" ] || ROOT="$(checkout_root 2>/dev/null || repo_root)"
 [ -d "$ROOT" ] || die "not a directory: $ROOT"
 ROOT="$(cd "$ROOT" && pwd -P)"
 STORE="$ROOT/.skill-manager"
@@ -138,8 +147,16 @@ pick_cli() {
   fi
   c="$(command -v skill-manager || true)"
   if [ -n "$c" ] && cli_has_home "$c"; then printf '%s\n' "$c"; return 0; fi
-  local candidate
-  for candidate in "$ROOT/skill-manager" "$ROOT"/constituents/*/skill-manager; do
+  # A CLI the checkout itself ships, then one the enclosing INTEGRATION repo
+  # ships. The second entry is what lets a constituent home find a capable
+  # build: bootstrapping constituents/deploy-helm searched only deploy-helm,
+  # which ships no skill-manager, so it died — or, worse, the caller exported
+  # SKILL_MANAGER_CLI once by hand and the pin was never recorded anywhere.
+  # The integration parent is where the epic build actually lives.
+  local candidate integration
+  integration="$(outermost_integration_root "$ROOT")"
+  for candidate in "$ROOT/skill-manager" "$ROOT"/constituents/*/skill-manager \
+                   ${integration:+"$integration/skill-manager" "$integration"/constituents/*/skill-manager}; do
     [ -x "$candidate" ] || continue
     [ -d "$candidate" ] && continue
     if cli_has_home "$candidate"; then printf '%s\n' "$candidate"; return 0; fi
@@ -175,6 +192,78 @@ for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME"):
     if value:
         print(value)
 '
+}
+
+# ------------------------------------------------------------- the CLI pin
+
+# <home>/bin/cli/skill-manager decides which build every launch from this home
+# runs. Both readers already exist — the generated launcher checks it before
+# PATH, and HomeDescriptor.resolveCli documents it as rule 3.
+#
+# Two ways it goes wrong, and the second is why this is a function rather than
+# a line inside the clone block:
+#
+#   * Empty. Every shim falls through to PATH, which on this machine is the
+#     released 0.19.2 — no `exec`, no `home`, no `home close-out`. The shims
+#     then fail unless the caller exports SKILL_MANAGER_CLI, which is the very
+#     thing the shims exist to avoid.
+#   * Occupied by `home shims`' own generated shim, which RESOLVES VIA PATH by
+#     design (it is written to stay valid if the home is copied elsewhere).
+#     Newer builds write it during step 5 above, so the old
+#     `[ ! -e ]` guard saw an occupied slot and skipped the pin — and the home
+#     ended up pointing at the released CLI anyway. Measured: the root home,
+#     bootstrapped before `home shims` filled the slot, carries the absolute
+#     pin; every constituent home bootstrapped after it carries the
+#     PATH-resolving shim and therefore finds 0.19.2. That version answers
+#     `home close-out --help` with top-level usage and exit 0, which is the
+#     whole reason close-change.sh probes help TEXT instead of exit status.
+#
+# So: write the pin when the slot is empty, and REPLACE the generated
+# PATH-resolving shim, which is not a tool anyone installed. Anything else in
+# that slot is left alone — it could be a real CLI dep.
+#
+# Deliberately absolute, and deliberately without a PATH fallback: falling back
+# is the behaviour being removed, and a silent downgrade to a CLI missing whole
+# subcommands is worse than a loud failure.
+PIN_MARKER='git-integration-repo:cli-pin'
+
+ensure_cli_pin() {
+  local slot="$STORE/bin/cli/skill-manager" why=""
+  if [ ! -e "$slot" ]; then
+    why="empty"
+  elif command grep -q -F "$PIN_MARKER" "$slot" 2>/dev/null; then
+    why="refreshing this script's own pin"
+  elif command grep -q -F 'home shims' "$slot" 2>/dev/null; then
+    why="replacing the PATH-resolving shim from \`home shims\`"
+  else
+    return 0    # someone else's tool; not ours to overwrite
+  fi
+  say "cli pin:   $slot ($why) -> $CLI"
+  mkdir -p "$STORE/bin/cli"
+  cat > "$slot" <<EOF
+#!/usr/bin/env bash
+# $PIN_MARKER — written by git-integration-repo's bootstrap-home.sh.
+#
+# The skill-manager build that goes with THIS home. The launcher shims and
+# HomeDescriptor.resolveCli both look here before PATH, so a home does not
+# depend on whichever version happens to be installed globally — the released
+# CLI on PATH can be older than the build the home was created with and lack
+# whole subcommands (\`exec\`, \`home\`, \`home close-out\`).
+#
+# There is no PATH fallback on purpose. Falling through to an older CLI is the
+# failure this file exists to remove, and that CLI answers unknown subcommands
+# with top-level usage and exit 0 — a downgrade that looks like success.
+set -euo pipefail
+cli="\${SKILL_MANAGER_CLI:-$CLI}"
+if [ ! -x "\$cli" ]; then
+  echo "skill-manager: the CLI pinned for this home is missing or not executable:" >&2
+  echo "  \$cli" >&2
+  echo "  Re-pin it: bootstrap-home.sh --root '$ROOT' --force" >&2
+  exit 127
+fi
+exec "\$cli" "\$@"
+EOF
+  chmod +x "$slot"
 }
 
 bootstrapped=0; frozen_skip=0
@@ -240,28 +329,9 @@ if [ "$bootstrapped" = 0 ]; then
   #    state (policy, resolved CLI, gateway ownership, unit snapshot).
   "$CLI" home shims --home "$STORE" >/dev/null || die "could not write the launcher shims"
 
-  # 5b. The CLI the home carries. Both readers of this slot already exist —
-  #     the generated launcher checks "$home/bin/cli/skill-manager" before
-  #     PATH, and HomeDescriptor.resolveCli documents it as rule 3 — but
-  #     nothing in skill-manager WRITES it. Left empty, every shim falls
-  #     through to PATH, which on this machine is a released CLI with no
-  #     `exec` subcommand, so the shims fail unless the caller exports
-  #     SKILL_MANAGER_CLI — the very thing the shims exist to avoid. Filling
-  #     the documented slot is the smallest fix that keeps one idiom; it
-  #     belongs in `home shims` or `home clone` upstream.
-  #     Never overwrites: an entry here could be a real installed tool.
-  if [ ! -e "$STORE/bin/cli/skill-manager" ]; then
-    mkdir -p "$STORE/bin/cli"
-    cat > "$STORE/bin/cli/skill-manager" <<EOF
-#!/usr/bin/env bash
-# Written by git-integration-repo's bootstrap-home.sh: the skill-manager CLI
-# that goes with THIS home. The launcher shims and HomeDescriptor.resolveCli
-# both look here before PATH, so a home is not dependent on whatever version
-# happens to be installed globally.
-exec "$CLI" "\$@"
-EOF
-    chmod +x "$STORE/bin/cli/skill-manager"
-  fi
+  # 5b. see ensure_cli_pin below — it runs for existing homes too.
+  ensure_cli_pin
+
   "$CLI" home describe --home "$STORE" --home-root "$ROOT" --write >/dev/null \
     || die "could not write home.runtime.json"
 
@@ -276,6 +346,16 @@ EOF
 fi
 
 export SKILL_MANAGER_HOME="$STORE"
+
+# Repair an ALREADY-bootstrapped home too. Homes created before this pin
+# existed — or created after `home shims` started filling the slot itself —
+# carry the PATH-resolving shim and quietly run whatever CLI is installed
+# globally. Re-running bootstrap-home.sh should fix that without --force,
+# because the operator has no way to know the slot is wrong. A frozen home is
+# evidence and is never written, here as everywhere else.
+if [ "$bootstrapped" = 1 ] && [ "$frozen_skip" = 0 ]; then
+  ensure_cli_pin
+fi
 
 # --------------------------------------------------------------- assertions
 

@@ -4,6 +4,49 @@ A cross-repo change is made once, in one parent worktree, against one ticket,
 then fanned out. This is the composition idea: **multi-repo changes need a
 ticket and a worktree, but no submodules** — the worktree is just files.
 
+## Which repo `new-change.sh` acts on, and where the worktree goes
+
+Both of these were wrong in ways that produced no error message, so they are
+stated before the flow rather than after it.
+
+**The repo is the nearest enclosing git toplevel**, and the script prints it.
+A constituent has its own real `.git`, so run from `constituents/deploy-helm`
+the answer is deploy-helm — not the integration parent that tracks its files.
+Three shapes, all supported:
+
+| Where you run it | `kind` | What is branched | `propagate.sh` after? |
+|---|---|---|---|
+| A checkout holding `integration.toml` | `integration` | that repo; constituent files are plain files in the worktree | yes |
+| A **nested** integration repo (`constituents/meta-orchestrator`) | `integration` | the nested repo — it is one in its own right | yes, within it |
+| An ordinary constituent (`constituents/deploy-helm`) | `constituent` | the constituent | **no** — nothing beneath it to fan out to |
+| A repo outside any integration repo | `standalone` | that repo | no |
+
+Standing in a constituent and wanting the *parent* is a real case:
+`new-change.sh TICKET --integration` targets the enclosing integration repo
+without a `cd`.
+
+**The worktree is placed beside the OUTERMOST enclosing integration repo**,
+never inside one. For a top-level repo that is its own parent directory, which
+is where worktrees have always gone. For anything living inside an integration
+repo it is the difference between a clean parent and a broken one:
+
+```
+constituents/meta-orchestrator  ->  ../meta-orchestrator-TICKET-123
+constituents/deploy-helm        ->  ../deploy-helm-TICKET-123
+```
+
+A worktree under `constituents/` is not merely untracked noise in the parent's
+`git status`. A worktree's `.git` is a **file**, so a parent `git add -A` stages
+the whole directory as a gitlink (mode `160000`) — exactly the submodule
+`INTEGRATION.md` rule 1 forbids. Nor can the parent's `.gitignore` fix it: any
+glob wide enough to match `constituents/meta-orchestrator-CO2` also matches real
+constituents named `deploy-helm` or `hyper-experiments`. So the worktree goes
+where the parent cannot see it, and `new-change.sh` refuses outright if a
+worktree path would land inside an integration repo's working tree.
+
+`close-change.sh` derives the path from the same helper, so it closes exactly
+what `new-change.sh` opened, from either repo.
+
 ## Why a worktree
 
 - The parent worktree checks out constituent files as **plain files** — no
@@ -20,10 +63,13 @@ ticket and a worktree, but no submodules** — the worktree is just files.
 ```bash
 S=<this-skill>/scripts
 
-# 1. Start the change. Requires a clean parent tree.
+# 1. Start the change. Requires a clean tree in the repo it picks — and it
+#    prints which repo that is, and of what kind, before doing anything.
 $S/new-change.sh TICKET-123
-#    -> creates ../<repo>-TICKET-123 on branch feature/TICKET-123 (plain files)
+#    -> creates <repo>-TICKET-123 on branch feature/TICKET-123, beside the
+#       outermost enclosing integration repo (plain files)
 #    -> and gives it its OWN skill-manager home before returning
+#    -> add --integration to target the parent from inside a constituent
 
 WT=../<repo>-TICKET-123
 
@@ -70,13 +116,18 @@ Create the ticket in your tracker first; `[integration].tracker` in
 
 ## Notes
 
-- **Keep the parent tree clean between changes.** `new-change.sh` refuses to
-  start if it is dirty — commit or stash first.
+- **Keep the tree clean between changes.** `new-change.sh` refuses to start if
+  the repo it picked is dirty — commit or stash first. The refusal names that
+  repo, because "not clean" printed against files you did not expect is the
+  first sign it picked one you did not mean.
+- **Read the `repo:`/`kind:` lines it prints.** They are the whole defence
+  against a wrong target: the failure this replaced was silent and exited 0.
 - **One ticket per worktree.** Parallel tickets get separate worktrees and
   separate branches; they never share a worktree.
-- **Do not run git inside the worktree's constituent directories** — there is no
-  `.git` there, and you do not want one. Constituent-level git happens later in
-  the main tree during propagation.
+- **Do not run git inside an integration worktree's constituent directories** —
+  there is no `.git` there, and you do not want one. Constituent-level git
+  happens later in the main tree during propagation. (A `constituent` worktree
+  is an ordinary checkout of one repo and has no such rule.)
 - **The worktree's home dies with the worktree.** `git worktree remove` deletes
   `<wt>/.skill-manager` too, including any skill edit an agent made in it that
   was never pushed back. `close-change.sh` is the reason you no longer have to

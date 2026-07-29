@@ -86,12 +86,19 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TARGET" ] || { usage; die "a ticket or worktree path is required"; }
 
-ROOT="$(repo_root)"; cd "$ROOT"
+# checkout_root, not repo_root, and for the same reason new-change.sh uses it:
+# a constituent has its own .git, so the repo whose worktree this is, is the
+# nearest git toplevel. Resolving the integration parent here would look for
+# the worktree in the wrong repo's `worktree list` and refuse a perfectly real
+# one. The two scripts must answer this identically or close-change.sh cannot
+# close what new-change.sh opened.
+ROOT="$(checkout_root)"; cd "$ROOT"
 
-# A path if it looks like one or exists; otherwise the new-change.sh convention.
+# A path if it looks like one or exists; otherwise the new-change.sh
+# convention, computed by the SAME helper so the two cannot drift apart.
 case "$TARGET" in
   */*|.|..) WT="$TARGET" ;;
-  *)        WT="$(dirname "$ROOT")/$(basename "$ROOT")-$TARGET" ;;
+  *)        WT="$(ticket_worktree_path "$ROOT" "$TARGET")" ;;
 esac
 [ -d "$WT" ] || die "not a directory: $WT"
 WT="$(cd "$WT" && pwd -P)"
@@ -135,14 +142,20 @@ info "into:      ${INTO}"
 #
 # Search order puts the worktree's OWN bin/cli first: that slot names the build
 # the home was created with, which is the build that understands its layout.
-cli_has_close_out() { "$1" home close-out --help 2>&1 | grep -q -- '--into'; }
+cli_has_close_out() { "$1" home close-out --help 2>&1 | command grep -q -- '--into'; }
 
 pick_cli() {
-  local pinned="${SKILL_MANAGER_CLI:-}" c
+  local pinned="${SKILL_MANAGER_CLI:-}" c integration
   if [ -n "$pinned" ] && [ -x "$pinned" ] && cli_has_close_out "$pinned"; then
     printf '%s\n' "$pinned"; return 0
   fi
-  for c in "$STORE/bin/cli/skill-manager" "$ROOT/skill-manager" "$ROOT"/constituents/*/skill-manager; do
+  # The enclosing integration repo is in the list because a CONSTITUENT
+  # worktree's $ROOT is the constituent, which ships no skill-manager of its
+  # own; the epic build lives in the parent. Same addition as
+  # bootstrap-home.sh's pick_cli, for the same reason.
+  integration="$(outermost_integration_root "$ROOT")"
+  for c in "$STORE/bin/cli/skill-manager" "$ROOT/skill-manager" "$ROOT"/constituents/*/skill-manager \
+           ${integration:+"$integration/skill-manager" "$integration"/constituents/*/skill-manager}; do
     [ -f "$c" ] && [ -x "$c" ] && cli_has_close_out "$c" && { printf '%s\n' "$c"; return 0; }
   done
   c="$(command -v skill-manager || true)"

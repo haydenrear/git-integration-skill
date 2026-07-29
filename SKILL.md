@@ -113,12 +113,20 @@ $S/verify.sh                                      # assert parent clean + every 
 
 # --- agent homes ---
 $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-manager home (idempotent)
+#   --root defaults to the nearest git toplevel — inside a constituent that is
+#   the CONSTITUENT, not the integration parent. Re-running also re-pins
+#   <home>/bin/cli/skill-manager to the build it resolved.
 
 # --- change ---
-$S/new-change.sh TICKET-123                        # parent worktree on feature/TICKET-123 (plain files)
+$S/new-change.sh TICKET-123                        # worktree on feature/TICKET-123
+#   ...acts on the NEAREST enclosing git repo and prints which one and of what
+#      kind (integration | constituent | standalone). From a constituent it
+#      branches the CONSTITUENT; add --integration for the parent instead.
+#   ...places the worktree BESIDE the outermost enclosing integration repo, so
+#      a nested repo's worktree never lands in the parent's constituents/.
 #   ...also bootstraps the worktree's OWN home; launch agents via
 #      ../<repo>-TICKET-123/.skill-manager/bin/launch/claude
-#   ...edit across constituents in the worktree, commit to the parent feature branch...
+#   ...edit in the worktree, commit to the feature branch...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
 
 # --- close ---

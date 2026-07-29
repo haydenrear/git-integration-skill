@@ -9,6 +9,25 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*" >&2; }
 step() { printf '\n== %s ==\n' "$*" >&2; }
 
+# Two questions that look like one. Conflating them is how new-change.sh came
+# to build a worktree of the wrong repository, silently and with exit 0:
+#
+#   repo_root()      Which INTEGRATION repo am I operating on? propagate.sh,
+#                    refresh.sh, verify.sh, add-constituent.sh and
+#                    finalize-constituents.sh are meaningless outside one, so
+#                    walking up to the nearest integration.toml is right for
+#                    them.
+#
+#   checkout_root()  Which repo does `git worktree add` act on HERE? The
+#                    nearest enclosing git toplevel. A constituent has its own
+#                    real .git, so from inside constituents/deploy-helm the
+#                    answer is deploy-helm — not the parent that merely tracks
+#                    its files. repo_root() answers the parent there, and a
+#                    worktree built on that answer branches a different
+#                    repository entirely.
+#
+# Anything that creates or removes a worktree wants checkout_root().
+
 # Repo root = nearest ancestor with integration.toml. Falls back to git toplevel.
 repo_root() {
   local d="${1:-$PWD}"
@@ -18,6 +37,91 @@ repo_root() {
     d="$(dirname "$d")"
   done
   git rev-parse --show-toplevel 2>/dev/null || die "not inside an integration repo (no integration.toml found)"
+}
+
+# The git repo a worktree command here would act on: nearest enclosing
+# toplevel, physical path.
+checkout_root() {
+  local d="${1:-$PWD}" top
+  top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" \
+    || die "not inside a git repository: $(cd "$d" && pwd -P)"
+  (cd "$top" && pwd -P)
+}
+
+# The HIGHEST ancestor of $1 holding integration.toml; empty when there is
+# none. Highest, not nearest: integration repos nest — meta-orchestrator is a
+# constituent of this repo and an integration repo in its own right — and it is
+# the OUTERMOST working tree that must stay unpolluted.
+outermost_integration_root() {
+  local d out=""
+  d="$(cd "${1:-$PWD}" && pwd -P)"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/integration.toml" ] && out="$d"
+    d="$(dirname "$d")"
+  done
+  printf '%s\n' "$out"
+}
+
+# What kind of checkout $1 is: integration | constituent | standalone.
+# "constituent" here means only "a git repo living inside an integration repo's
+# working tree" — it does not consult integration.toml's [[constituent]] list,
+# because a repo that is not listed yet has exactly the same worktree hazard.
+checkout_kind() {
+  local root; root="$(cd "$1" && pwd -P)"
+  if [ -f "$root/integration.toml" ]; then printf 'integration\n'; return 0; fi
+  if [ -n "$(outermost_integration_root "$root")" ]; then printf 'constituent\n'; return 0; fi
+  printf 'standalone\n'
+}
+
+# Where $1's ticket worktrees live: BESIDE the outermost enclosing integration
+# repo, never inside one.
+#
+# For a top-level repo this is the same directory as before (the repo's own
+# parent), so the ordinary case is unchanged. For a repo that sits INSIDE an
+# integration repo — an ordinary constituent, or a nested integration repo like
+# meta-orchestrator — the old rule dropped the worktree into the parent's
+# constituents/, where the parent reports it as untracked and no rule ignores
+# it. Worse than untracked: a worktree's `.git` is a FILE, so a parent
+# `git add -A` stages the whole directory as a gitlink (mode 160000) — exactly
+# the submodule INTEGRATION.md rule 1 forbids.
+#
+# It cannot be fixed from the parent's .gitignore either: any glob wide enough
+# to catch `constituents/meta-orchestrator-CO2` also catches real constituents
+# named `deploy-helm` or `hyper-experiments`. So the worktree goes where the
+# parent cannot see it at all.
+worktree_parent_dir() {
+  local root outer
+  root="$(cd "$1" && pwd -P)"
+  outer="$(outermost_integration_root "$root")"
+  dirname "${outer:-$root}"
+}
+
+# The conventional worktree path for a ticket. new-change.sh creates it and
+# close-change.sh resolves it; one implementation so the two cannot disagree
+# about where a worktree is.
+ticket_worktree_path() {
+  local root="$1" ticket="$2"
+  root="$(cd "$root" && pwd -P)"
+  printf '%s/%s-%s\n' "$(worktree_parent_dir "$root")" "$(basename "$root")" "$ticket"
+}
+
+# Refuse a worktree path that lands inside an integration repo's working tree.
+# worktree_parent_dir already avoids it; this is the assertion that turns any
+# future mistake — or a hand-passed path — into a loud failure instead of a
+# gitlink in someone else's index.
+assert_worktree_outside_integration() {
+  local wt="$1" parent enclosing
+  parent="$(dirname "$wt")"
+  [ -d "$parent" ] || die "worktree parent directory does not exist: $parent"
+  enclosing="$(outermost_integration_root "$parent")"
+  if [ -n "$enclosing" ]; then
+    die "refusing to create a worktree at
+    $wt
+  because that path is inside the integration repository
+    $enclosing
+  which would report it as untracked and, on \`git add -A\`, stage the whole
+  worktree as a gitlink (INTEGRATION.md rule 1). Choose a path outside it."
+  fi
 }
 
 # Pick any Python 3 interpreter. _manifest.py is dependency-free (no tomllib),
@@ -42,11 +146,13 @@ constituent_default_branch() {
   printf '%s\n' "$fallback"
 }
 
-# Assert the parent working tree is clean.
+# Assert a working tree is clean. Names the repo: the caller is not always the
+# integration parent, and "parent working tree is not clean" printed against a
+# constituent's files is how you misread which repo a script picked.
 assert_parent_clean() {
   local root="$1"
   if [ -n "$(git -C "$root" status --porcelain)" ]; then
     git -C "$root" status --short >&2
-    die "parent working tree is not clean (see above)"
+    die "working tree is not clean: $root (see above)"
   fi
 }
