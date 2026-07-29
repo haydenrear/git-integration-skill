@@ -92,7 +92,7 @@ constituent would clobber it.
 |---|---|---|
 | Create / onboard an integration repo | `references/onboarding.md` | `scripts/init-integration.sh`, `scripts/add-constituent.sh`, `scripts/finalize-constituents.sh`, `scripts/verify.sh` |
 | Give a checkout its own skill-manager home | `references/skill-homes.md` | `scripts/bootstrap-home.sh` |
-| Make a ticketed multi-repo change | `references/worktrees.md` | `scripts/new-change.sh` |
+| Make a ticketed multi-repo change | `references/worktrees.md` | `scripts/new-change.sh`, `scripts/close-change.sh` |
 | Fan a merged change out to constituents | `references/propagation.md` | `scripts/propagate.sh` |
 | Scaffold spec / test-graph / deploy | `references/composition.md` | (invokes the composed skills) |
 | Refresh from upstream (destructive) | `references/git-model.md` | `scripts/refresh.sh` |
@@ -120,6 +120,13 @@ $S/new-change.sh TICKET-123                        # parent worktree on feature/
 #      ../<repo>-TICKET-123/.skill-manager/bin/launch/claude
 #   ...edit across constituents in the worktree, commit to the parent feature branch...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
+
+# --- close ---
+$S/close-change.sh TICKET-123                      # gate on `home close-out`, THEN remove the worktree
+#   refuses (exit 4) while the worktree's home still holds unit work, naming
+#   each blocker and the command that clears it. --force discards deliberately.
+#   Use this instead of a bare `git worktree remove`, which deletes the home
+#   and any unpushed skill edit in it without a word.
 
 # --- fan out ---
 $S/propagate.sh TICKET-123                          # per-constituent: branch, commit, push, MR + one tracking issue

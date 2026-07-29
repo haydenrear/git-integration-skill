@@ -72,12 +72,17 @@ Launch an agent bound to this worktree's own home:
 Then commit to the parent feature branch and bring it back:
   git -C "$WT" add -A && git -C "$WT" commit -m "$TICKET: <what changed>"
   git -C "$ROOT" merge --no-ff "$BRANCH"
-  git -C "$ROOT" worktree remove "$WT"     # takes the worktree's home with it
+Close the worktree through the gate (NOT a bare "git worktree remove"):
+  $SCRIPT_DIR/close-change.sh "$TICKET"
 Finally fan it out to the constituents:
   $SCRIPT_DIR/propagate.sh "$TICKET"
 
 Teardown note: the home lives inside the worktree, so removing the worktree
-removes the home. Push any skill edit made in it back to that skill's own repo
-FIRST (see references/skill-homes.md — push-back is not propagate.sh), because
-"git worktree remove" deletes an unpushed skill change without a trace.
+removes the home, and because the home is gitignored that loss appears in no
+diff. close-change.sh runs "skill-manager home close-out" first and refuses
+while the home still holds unit work, naming each blocker and its remedy; pass
+--force to discard deliberately. See references/skill-homes.md. Reconciling
+into the project home is NOT the same as pushing a skill edit back to that
+skill's own repo — that is the separate push-back flow, and it is not
+propagate.sh.
 EOF

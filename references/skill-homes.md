@@ -123,7 +123,10 @@ A skill's files inside a home are **not** part of the parent diff: the home is
 gitignored, so `git add -A` in the worktree never sees them and `propagate.sh`
 can never carry them. If an agent edits a skill in its home and you only run
 `propagate.sh`, the edit is not published anywhere — and `git worktree remove`
-then deletes it. **Push back before teardown.**
+then deletes it. **Push back before teardown.** `close-change.sh` enforces the
+first, weaker half of that (the edit reaches the *project home*) and will not
+let a bare removal skip it; getting the edit to the skill's own repo is still
+this push-back flow, and still yours to run.
 
 The reverse mistake is just as bad: a skill lives in its own repo, so editing
 its copy under `constituents/<skill>/` and propagating that is the *parent*
@@ -144,18 +147,74 @@ stays as it was.
 
 ## Teardown, including at epic close
 
+Tear a worktree down with `close-change.sh`, never with a bare
+`git worktree remove`:
+
 ```bash
-# 1. Push back anything the agent changed in the worktree's OWN home first.
-#    (skill-manager project sync / the skill-publisher flow — not propagate.sh)
-# 2. Then the ordinary worktree teardown; the home goes with the directory.
-git -C <repo-root> worktree remove ../<repo>-TICKET-123
-# 3. At epic close, list what is left and remove each one deliberately.
+# The gate runs BEFORE anything is deleted.
+<this-skill>/scripts/close-change.sh TICKET-123
+
+# At epic close, list what is left and close each one deliberately.
 git -C <repo-root> worktree list
 ```
 
-`git worktree remove` succeeds with a home inside it because the home is
-ignored, not untracked — which is also why the ignore rules matter. It deletes
-the home without asking, so step 1 is not optional.
+`close-change.sh` runs
+
+```bash
+skill-manager home close-out --home <wt>/.skill-manager \
+                             --into <repo-root>/.skill-manager --json
+```
+
+and **refuses to remove the worktree** (exit 4) while that verdict is non-zero,
+printing every blocking unit and the exact command that clears it. Run the
+remedy, re-run the script, and the removal proceeds.
+
+Why a script rather than a rule: `git worktree remove` succeeds with a home
+inside it because the home is ignored, not untracked — which is also why the
+ignore rules matter. It deletes the home **without asking**, and it succeeds
+exactly as quietly whether the home held a week of skill edits or nothing.
+Because the home is gitignored, the loss shows up in no diff, so "push back
+before teardown" was a discipline that failed silently the first time anyone
+forgot. The gate makes it a mechanism.
+
+### The override, and why it exists
+
+```bash
+<this-skill>/scripts/close-change.sh TICKET-123 --force
+```
+
+`--force` still runs the gate and still prints the blockers; it only declines to
+stop, and it says plainly that the work is being discarded. It exists because a
+gate with no escape hatch does not stop the operator who genuinely wants to
+throw a spike away — it routes them to `rm -rf` or `git worktree remove --force`
+by hand, which skips this check *and* every other one. A named, loud override is
+safer than an improvised one.
+
+### How it degrades
+
+The rule is: proceed only when the gate has actually established there is
+nothing to lose.
+
+| Situation | What close-change.sh does | Why |
+|---|---|---|
+| Worktree has **no home** (`--no-home`) | Removes it, saying the gate was skipped | Absence of a home really is proof there is no home-resident work |
+| **No `skill-manager` with `close-out`** on `SKILL_MANAGER_CLI`, the home's `bin/cli`, the checkout, or PATH | **Refuses** | Absence of the tool is absence of *proof*, which is not the same thing. A gate that opens when it cannot check is not a gate |
+| **Project home missing** (`--into` does not exist) | **Refuses** | The work has nowhere to go and there is nothing to compare against |
+| Gate reports blockers | **Refuses**, printing each remedy | The case the gate exists for |
+
+The capability probe reads the CLI's help **text**, not its exit status, for the
+same measured reason `bootstrap-home.sh` does: the released 0.19.2 answers
+`home close-out --help` by printing top-level usage and **exiting 0**. A
+status-only probe would accept a CLI with no `close-out` at all and the teardown
+would sail past a gate that never ran.
+
+### Reconciling is not publishing
+
+The gate's remedy (`home sync … --merge`) moves the work into the **project
+home**, which is what stops the teardown destroying it. That is not the same as
+getting the edit back to the skill's own repository — for that, see the
+push-back flow in the table above. Clearing the gate makes the edit survive the
+worktree; it does not make it survive the machine.
 
 The global `~/.skill-manager` is never a teardown target. Nothing in this flow
 writes it; `bootstrap-home.sh` refuses outright if a target home would resolve

@@ -42,7 +42,14 @@ git -C "$WT" commit -m "TICKET-123: <cross-repo change summary>"
 
 # 4. Bring it back into the integration main tree.
 git merge --no-ff feature/TICKET-123
-git worktree remove "$WT"
+
+# 4b. Close the worktree THROUGH THE GATE, not with a bare `git worktree remove`.
+#     close-change.sh runs `skill-manager home close-out` first and refuses
+#     (exit 4) while the worktree's own home still holds unit work, printing
+#     each blocking unit and the command that clears it.
+$S/close-change.sh TICKET-123
+#     -> blocked? run the remedy it prints, then re-run.
+#     -> really want to throw the work away? $S/close-change.sh TICKET-123 --force
 
 # 5. Fan out to the constituents.
 $S/propagate.sh TICKET-123 --push --mr
@@ -72,7 +79,9 @@ Create the ticket in your tracker first; `[integration].tracker` in
   the main tree during propagation.
 - **The worktree's home dies with the worktree.** `git worktree remove` deletes
   `<wt>/.skill-manager` too, including any skill edit an agent made in it that
-  was never pushed back. Push back first — that is a different flow from
+  was never pushed back. `close-change.sh` is the reason you no longer have to
+  remember this: it asks `home close-out` first and refuses while there is
+  anything to lose. Reconciling into the project home is a different flow from
   `propagate.sh`; see `references/skill-homes.md`.
 - **`--no-home` exists but costs you the isolation.** A worktree created with it
   runs agents against the global home, which is what the per-worktree home is
