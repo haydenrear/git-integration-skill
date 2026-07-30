@@ -316,12 +316,26 @@ for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME"):
 # subcommands is worse than a loud failure.
 PIN_MARKER='git-integration-repo:cli-pin'
 
+# What an OLDER version of this script wrote, before PIN_MARKER existed.
+#
+# Without this, `ensure_cli_pin` could not recognise its own past output and took
+# the "someone else's tool" branch — so the very homes most likely to carry a
+# stale, broken pin were the only ones it refused to repair. Found when the CLI
+# pin turned out not to export SKILL_MANAGER_HOME: 16 homes were repaired by
+# re-running this script and the 17th, the oldest, silently was not.
+#
+# Failing closed on an unrecognised file is right; failing closed on a file this
+# script wrote is a gap, not caution.
+LEGACY_PIN_MARKER="Written by git-integration-repo's bootstrap-home.sh"
+
 ensure_cli_pin() {
   local slot="$STORE/bin/cli/skill-manager" why=""
   if [ ! -e "$slot" ]; then
     why="empty"
   elif command grep -q -F "$PIN_MARKER" "$slot" 2>/dev/null; then
     why="refreshing this script's own pin"
+  elif command grep -q -F "$LEGACY_PIN_MARKER" "$slot" 2>/dev/null; then
+    why="upgrading a pin written before this script marked its own output"
   elif command grep -q -F 'home shims' "$slot" 2>/dev/null; then
     why="replacing the PATH-resolving shim from \`home shims\`"
   else
