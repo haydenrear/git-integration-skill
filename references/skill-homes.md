@@ -44,6 +44,93 @@ thin wrappers over it. **Launch agents through the shims** (or through
 `skill-manager exec`) and you inherit the whole contract; export variables by
 hand and you get the part you remembered.
 
+But note what that is: **convention**. Env vars and PATH order. Nothing in it
+*stops* a process writing to `~/.skill-manager`, to another project's home, or
+to `~/.ssh`. Every leak this epic fixed was a process writing where nothing
+stopped it, and every fix was a convention that regresses the moment someone
+forgets a variable. That is what the next section is for.
+
+## The kernel boundary — opt-in, per home
+
+```bash
+skill-manager home shims --sandbox --home <worktree>/.skill-manager
+```
+
+writes `<home>/launch.sb` and declares `SKILL_MANAGER_SANDBOX=1` in the
+descriptor. From then on every launch through that home — every shim, every
+grandchild — runs under `/usr/bin/sandbox-exec`, which enforces at the kernel:
+
+| | |
+|---|---|
+| **Writable** | the **worktree** (`<home>/..`, which contains `.skill-manager`, `.claude`, `.codex`, `.gemini`), the store, and `$TMPDIR` / `/tmp` / `/var/tmp` |
+| **Readable** | everything |
+| **Denied** | every other write, including all four operator homes |
+
+The writable root is the *worktree*, not the home, because an agent handed a
+ticket has to edit the source tree the ticket is about.
+
+Undo it with `--no-sandbox`. A home that never opted in behaves exactly as it
+does today.
+
+### What this is NOT
+
+**A filesystem boundary against accidents. Not containment against an
+adversary.** Three ways out, all measured, all reachable by ordinary code with
+no adversarial intent:
+
+1. **An inherited write file descriptor.** `sandbox(7)` enforces at
+   *acquisition*. A parent that opens `~/.claude/x` and then spawns the
+   sandboxed child has handed it a working handle; the sandbox never sees a
+   path. Not fixable.
+2. **A pre-existing daemon is a confused deputy.** A sandboxed Gradle build
+   talks to an already-running *unsandboxed* daemon and the daemon does the
+   writing. There was one on this machine writing into
+   `~/.skill-manager/skills/test-graph/.../.gradle/` from another session while
+   this was being built. Any client of any out-of-sandbox service has this
+   shape.
+3. **A hardlink made outside the sandbox** leaves a protected inode reachable
+   through an allowed path. The kernel checks the path that is opened, and that
+   path is allowed.
+
+Also: `/tmp`, `/var/tmp` and `$TMPDIR` are fully writable — `/bin/bash` 3.2
+writes here-document bodies to `/tmp` and ignores `TMPDIR`, so without that
+every `bash -c 'cat <<EOF'` in an agent session fails. Nothing this profile
+protects lives there; do not put anything you are protecting there either.
+
+### Things that will bite you
+
+- **A profile edit is a launch failure, not a silent widening.** SBPL is
+  *last-match-wins*: one appended `(allow file-write* (subpath "/"))` reopens
+  everything while the file still reads as deny-by-default. `exec` re-parses
+  `launch.sb` on every launch and refuses (exit **11**) if any rule grants a
+  write to something that is neither a `(param "…")` nor a `/dev/` device.
+- **Asking for it and not getting it is also exit 11.** Missing
+  `sandbox-exec`, missing `launch.sb`, or a bad parameter stops the launch
+  rather than proceeding unconfined. Proceeding would leave you believing in a
+  boundary you do not have.
+- **The global home cannot be sandboxed**, by construction: its store is
+  `~/.skill-manager`, so its home root is `~`, so the writable root would be
+  `$HOME` — every home it exists to protect. That is refused explicitly.
+- **A denial reaches a shell as exit 0.** `sh -c 'echo x > denied'` under
+  `sandbox-exec` prints `Operation not permitted` and exits 0. Check the
+  *file*, never the status.
+- **Build caches are redirected, not allowed out.** A sandboxed launch gets
+  `GRADLE_USER_HOME`, `UV_CACHE_DIR`, `npm_config_cache`, `XDG_CACHE_HOME` and
+  `JBANG_DIR` under `<worktree>/.cache/`. The first sandboxed build in a fresh
+  home therefore re-downloads. `~/.m2` is *not* redirected — Maven has no cache
+  env var; pass `-Dmaven.repo.local` if you need it.
+- **`sandbox-exec(1)` has said DEPRECATED since 2017** and has no sanctioned
+  successor (App Sandbox needs a signed, entitled bundle). It is still shipped
+  and rebuilt with the OS. The opt-in design is the mitigation: if it goes away
+  you lose enforcement and keep today's behaviour.
+
+The mechanism is `dev.skillmanager.launch.SeatbeltSandbox` /
+`SeatbeltProfile`; the profile is `openai/codex`'s
+`seatbelt_base_policy.sbpl` (Apache-2.0, crediting Chromium's `common.sb`,
+BSD-3) vendored verbatim plus a skill-manager section. The oracle is the
+`home-clone` graph node `home.clone.seatbelt.confines.the.worktree`, which
+asserts on bytes with an unsandboxed control.
+
 ## When to bootstrap
 
 | Checkout | When | How |
