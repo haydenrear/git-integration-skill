@@ -301,6 +301,16 @@ for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME"):
 # PATH-resolving shim, which is not a tool anyone installed. Anything else in
 # that slot is left alone — it could be a real CLI dep.
 #
+# REPLACING IT MEANS INHERITING ITS OBLIGATIONS. `LauncherShims.cliScript()` is
+# the other author of this file, and anything it does that is about the FILE
+# rather than about PATH resolution has to be carried across here or this
+# script silently reverts it. That already happened once: cliScript exports
+# SKILL_MANAGER_HOME from the script's own location so the entrypoint binds the
+# home it lives in, this pin did not, and every home bootstrapped through here
+# — all 17 of them — got an entrypoint that wrote to whichever home the caller
+# was carrying. Two paths that should agree, didn't, and nothing detected it.
+# Before changing the body below, diff it against cliScript().
+#
 # Deliberately absolute, and deliberately without a PATH fallback: falling back
 # is the behaviour being removed, and a silent downgrade to a CLI missing whole
 # subcommands is worse than a loud failure.
@@ -333,6 +343,26 @@ ensure_cli_pin() {
 # failure this file exists to remove, and that CLI answers unknown subcommands
 # with top-level usage and exit 0 — a downgrade that looks like success.
 set -euo pipefail
+
+# BIND THE HOME. This file REPLACES the entrypoint \`skill-manager home shims\`
+# generates (see ensure_cli_pin), and that generated script exports
+# SKILL_MANAGER_HOME from its own location. Replacing it without carrying the
+# export across un-fixed a fix: the pin exec'd the CLI with whatever
+# SKILL_MANAGER_HOME the caller happened to carry, which unset is the
+# operator's global home. Measured on all 17 homes bootstrapped before this
+# line existed — \`<home>/bin/cli/skill-manager --version\` against an empty
+# decoy created TEN directories in the decoy. So the one command whose entire
+# purpose is "the CLI for THIS home" was the command most likely to mutate a
+# different one, and it is the command the onboarding checklist tells an agent
+# to run to prove the home works.
+#
+# Derived from this script's own location rather than baked in, so a home that
+# is copied to a new root binds the copy. No override on purpose, for the same
+# reason there is no PATH fallback: deferring to the environment would make
+# this indistinguishable from the bare CLI. Name a different home with --home.
+self_dir="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd -P)"
+export SKILL_MANAGER_HOME="\$(cd -- "\$self_dir/../.." && pwd -P)"
+
 cli="\${SKILL_MANAGER_CLI:-$CLI}"
 if [ ! -x "\$cli" ]; then
   echo "skill-manager: the CLI pinned for this home is missing or not executable:" >&2
