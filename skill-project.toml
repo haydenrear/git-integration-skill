@@ -1,0 +1,97 @@
+# Skill project manifest for git-integration-repo.
+#
+# What this declares: the units an agent working IN THIS CHECKOUT needs. Every
+# tracked file here — SKILL.md, its frontmatter and description, references/,
+# scripts/, assets/, skill-manager.toml — is skill-unit content, so the work
+# done here is unit authoring and the declared units are the authorities for
+# that work.
+#
+# It deliberately does NOT declare `git-integration-repo` itself. A repo is its
+# own source of truth; installing it into its own home would give an agent two
+# copies of the same skill with no rule about which one it is editing. That
+# matters more here than anywhere else in the fan-out, because
+# scripts/bootstrap-home.sh is the script that CREATES homes: an agent editing
+# it must be editing the tracked copy, not a copy installed under
+# .skill-manager/skills/git-integration-repo that the next `sync` overwrites.
+#
+# How the home is produced — read this before running `project resolve`
+# ---------------------------------------------------------------------
+# `project resolve` writes into whatever `SKILL_MANAGER_HOME` names. Run it
+# before this checkout has its own home and it mutates the operator's global
+# ~/.skill-manager. Create the local home first, point `SKILL_MANAGER_HOME` at
+# it, and only then resolve. This repo's own script is the one that does it:
+#
+#   mkdir -p .skill-manager/skills
+#   SKILL_MANAGER_CLI=<epic skill-manager> bash scripts/bootstrap-home.sh --root "$PWD" --force
+#   export SKILL_MANAGER_HOME="$PWD/.skill-manager"
+#   skill-manager project resolve --project-dir "$PWD" --skip-gateway
+#
+# `SKILL_MANAGER_HOME` alone does not redirect the agent-home projections;
+# export `CLAUDE_CONFIG_DIR`, `CLAUDE_HOME`, `CODEX_HOME` and `GEMINI_HOME` at
+# this checkout's own `.claude/`, `.codex/` and `.gemini/` as well. Those are
+# the paths `home describe --json`'s `env` block names and the launch shims in
+# `.skill-manager/bin/launch/` export for you.
+#
+# `--allow-same-home` is NOT needed. This project's home IS its own parent home,
+# and `project resolve` used to refuse that layout (skill-manager #32). The
+# refusal was wrong — it fired on the recipe's normal path — and has been
+# replaced by a warning naming the layout. The flag is still accepted and does
+# nothing.
+#
+# Coords are git-only (no registry is configured) and they name the REPO, not
+# the installed unit — see skill-publisher's references/coords-and-distribution.md.
+# The table key is the installed unit name, which is what
+# `.skill-manager/skills/<name>` uses.
+
+[project]
+name = "git-integration-repo"
+version = "0.1.0"
+description = "Create and operate integration repositories: constituents as ordinary tracked files, ticketed worktrees with their own Skill Manager homes, and fan-out of a merged change to each constituent as branches, MRs and a tracking issue."
+
+# --- authoring: skill-publisher is the authority on SKILL.md frontmatter, the
+#     description field, skill-manager.toml, references/ pages, and on the
+#     install/bind/sync round trip that ships an edit into a store ---
+
+[skills.skill-publisher]
+source = "github:haydenrear/skill-publisher-skill"
+
+# --- required BY skill-publisher, not chosen here: its SKILL.md `skill-imports`
+#     names `skill-manager` (references/skill-imports.md), and `project resolve`
+#     refuses the whole resolve with "references missing unit" until the
+#     imported unit is declared. Unit `skill_references` are followed
+#     automatically; markdown `skill-imports` are not.
+#
+#     It is the SUBSTANTIVE dependency of this repo. scripts/bootstrap-home.sh
+#     and scripts/close-change.sh are written against `home clone`, `home
+#     policy`, `home shims`, `home describe`, `home drift`, `home close-out` and
+#     `exec --print-env`; references/skill-homes.md documents the three-tier
+#     model and the live/frozen policy. Nothing here can be changed correctly
+#     without that surface's contract ---
+
+[skills.skill-manager]
+source = "github:haydenrear/skill-manager-skill"
+
+# --- REPO-SPECIFIC DECISION: spec-double-compiler, test-graph and deploy-helm
+#     are deliberately NOT declared, though this unit's SKILL.md `skill-imports`
+#     names all three.
+#
+#     They are named because scripts/finalize-constituents.sh can SCAFFOLD those
+#     surfaces into a newly onboarded constituent, and because SKILL.md tells a
+#     reader what an integration repo can compose. They are not what an agent
+#     editing this skill runs: the tracked content is markdown plus POSIX shell
+#     and stdlib Python, with no test_graph project and no specs/ tree here.
+#     scripts/selftest.sh and scripts/verify.sh are self-contained.
+#
+#     Confirmed empirically: `project resolve` validates `skill-imports` against
+#     INSTALLED units, and this repo's own unit is deliberately not installed
+#     into its own home, so its imports are not part of the resolve.
+#
+#     Cost of the alternative: test-graph references
+#     `github:haydenrear/deploy-cdc`, so declaring any of the three
+#     transitively installs deploy-helm and its three ~555 MB skill-script
+#     venvs. Measured across the onboarded homes, a home that pulls deploy-helm
+#     is ~1.8 GB and a home that does not is under 1 MB.
+
+# --- no [[vendored]] block: this repo tracks no symlinks and has no test_graph,
+#     so no path in the working tree holds content owned by another unit.
+#     Verified with `git ls-files -s | grep ^120000` -> 0 entries.

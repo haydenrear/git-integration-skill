@@ -48,6 +48,51 @@ checkout_root() {
   (cd "$top" && pwd -P)
 }
 
+# The MAIN working tree of the repository $1 is a checkout of. For an ordinary
+# checkout that is the checkout itself; for a LINKED worktree it is the repo the
+# worktree was created from — the "project" a ticket worktree hangs off.
+#
+# `git worktree list` names the main working tree first, always, and that answer
+# does not depend on where the caller is standing. Deriving it from the checkout
+# rather than from $PWD is the point: see project_home below.
+main_checkout_root() {
+  local d="${1:-$PWD}" first
+  first="$(git -C "$d" worktree list --porcelain 2>/dev/null \
+    | awk 'NR==1 && $1=="worktree"{ $1=""; sub(/^ /,""); print }')" || first=""
+  [ -n "$first" ] || return 1
+  (cd "$first" 2>/dev/null && pwd -P) || return 1
+}
+
+# True when $1 is a linked worktree rather than its repository's main working
+# tree. Non-zero (false) when $1 is not in a git repo at all.
+is_linked_worktree() {
+  local root main
+  root="$(cd "${1:-$PWD}" && pwd -P)"
+  main="$(main_checkout_root "$root")" || return 1
+  [ "$main" != "$root" ]
+}
+
+# THE project home for the repository $1 belongs to: <main working tree>/.skill-manager.
+#
+# One definition, and both halves of the worktree lifecycle read it:
+# bootstrap-home.sh clones a worktree home FROM it, close-change.sh reconciles
+# that home back INTO it. That is issue #50. The two used to answer the question
+# separately — bootstrap from `${SKILL_MANAGER_HOME:-$HOME/.skill-manager}`,
+# close-out from `<checkout_root>/.skill-manager` — and from a bare shell those
+# are different homes. Measured: bootstrap cloned the operator's 845 MB global
+# home into the worktree and close-out then blocked on 17 units before any work
+# existed, printing a remedy that would have synced those 17 GLOBAL units into
+# the project home.
+#
+# It is derived from the CHECKOUT, never from an environment variable, because
+# "the operator exported the right thing" is not a construction — the launch
+# shims export it and a bare shell does not, and a bare shell is how these
+# scripts are run by hand.
+project_home() {
+  local main; main="$(main_checkout_root "${1:-$PWD}")" || return 1
+  printf '%s/.skill-manager\n' "$main"
+}
+
 # The HIGHEST ancestor of $1 holding integration.toml; empty when there is
 # none. Highest, not nearest: integration repos nest — meta-orchestrator is a
 # constituent of this repo and an integration repo in its own right — and it is

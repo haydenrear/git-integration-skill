@@ -44,6 +44,79 @@ thin wrappers over it. **Launch agents through the shims** (or through
 `skill-manager exec`) and you inherit the whole contract; export variables by
 hand and you get the part you remembered.
 
+### It is a convention, and it is enforced by tests rather than by the kernel
+
+Say what that is plainly: **env vars and PATH order**. Nothing in it *stops* a
+process writing to `~/.skill-manager`, to another project's home, or to
+`~/.ssh`. A determined — or merely surprising — process can write anywhere the
+operator can. Every leak this epic fixed was a process writing where nothing
+stopped it.
+
+What keeps the convention from regressing is not a boundary, it is that the
+recipe is written down **once** and something fails when a second copy appears:
+
+- `test_graph/sources/lib/SmEnv.java` in `skill-manager` is the only place that
+  puts `SKILL_MANAGER_HOME`, `SKILL_MANAGER_INSTALL_DIR`, `CLAUDE_HOME`,
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GEMINI_HOME` into a child environment.
+  `sources/sandbox/SandboxEnvContract.java` is the oracle that keeps it the only
+  one: it fails if any other file writes one of those, and it fails if a file
+  that spawns the CLI does not reach `SmEnv` through its own `//SOURCES`
+  closure. It plants five synthetic nodes every run and requires the detector to
+  flag three and clear two, because a scan reporting "no violations" is worth
+  nothing until it has been shown to report one. Before that existed the recipe
+  lived in prose and four disagreeing copies, and **50 of 105** CLI env sites
+  passed neither the agent variables nor `HOME` — one of those projections
+  turned up in a live agent's available-skills list. It is 0 now.
+- `LaunchEnv.requireClaudeRedirected()`, called by `ExecCommand` **before any
+  child process is created**, refuses a launch whose Claude config directory
+  resolves outside the home root. Skills load from that directory, so an
+  unredirected one is not a warning, it is the wrong home.
+
+A `sandbox-exec` (Seatbelt) layer was built to make this a real kernel boundary,
+and it was **removed** (`skill-manager` #60, closed as not-planned; commit
+`5f8d61e`). Three reasons, none of them a defect in the code: it is macOS-only,
+so the guarantee existed on one platform and every other got the convention
+anyway; it fought the harnesses it was protecting, because `claude` and `codex`
+each spawn their own tooling and each met the profile somewhere different, so
+the failure mode was a mid-session `EPERM` from a process skill-manager did not
+write and could not explain; and its cache redirection gave every home a private
+copy of stores the operator already had (`~/.cache/uv` alone is 51 GB here, and
+this machine carries 35 homes). If you are looking for `SKILL_MANAGER_SANDBOX`,
+`launch.sb` or `home shims --sandbox`: they do not exist. Nothing in this repo
+offers a kernel boundary, and an earlier version of this page said otherwise.
+
+### What a per-home clone actually costs
+
+The three-tier model — a home per repository, a home per ticket worktree — is
+affordable because a clone is **copy-on-write**, not a copy. `Files.copy` with
+`COPY_ATTRIBUTES` takes the JDK's `clonefile(2)` path on APFS and the
+destination shares the source's blocks. Measured on this host by free-space
+delta on a dedicated volume: a `home clone` of a 189 MB home consumes **7.22 MB
+— 3.8%**. Do not check this with `du`; it attributes shared blocks to both files
+and reported 197.1 MB against 7.14 MB real.
+
+`cache/`, `tmp/`, `logs/`, `venvs/`, `tools/` and `npm/` are skipped on top of
+that (see the clone caveat further down).
+
+### Package caches are shared; install targets are not
+
+A home does **not** get a private package cache, and the distinction is not
+read-only versus writable — nothing here is read-only, and an agent can still
+`uv pip install` (`skill-manager` commit `8fddd6e`, `pm/PackageCaches.java`):
+
+| | category | |
+|---|---|---|
+| `~/.cache/uv`, `~/.npm`, the pip wheel cache | content-addressed | **shared** — an entry is named by the hash of what it holds, so two homes racing to populate one key write the same bytes |
+| `<home>/venvs`, `<home>/bin/cli`, `<home>/npm/<skill>`, `<home>/pm/<tool>`, `<home>/cache` | install target | **per-home** — mutable, and two homes pointed at one are a `--force` away from pulling the interpreter out from under each other |
+
+Sharing the store only pays if materializing out of it is cheap, so `UV_LINK_MODE`
+is chosen per filesystem: `clone` (reflink) when the store and the home can
+share blocks, `hardlink` on a same-filesystem pair that cannot reflink, `copy`
+across filesystems. Guessing wrong degrades rather than breaks — uv falls back
+to copy and warns. Measured counter-example for why this matters: three
+skill-script venvs in one home held 48,258 files across 48,258 distinct inodes,
+1.6 GB with zero sharing.
+
 ## When to bootstrap
 
 | Checkout | When | How |
@@ -67,6 +140,48 @@ applies to *content* — a change to a leaf that the nested parent also contains
 starts in the leaf, not in the duplicated nested path — and having a home per
 checkout does not change that ordering at all.
 
+## Which home a bootstrap clones FROM — and why it is not a choice
+
+A worktree home and the project home it will be reconciled back into must be
+**the same pair by construction**. `bootstrap-home.sh` and `close-change.sh`
+both derive it from the checkout, through one function (`project_home` in
+`lib.sh`):
+
+| Checkout being bootstrapped | Cloned from | `close-change.sh --into` |
+|---|---|---|
+| A **linked worktree** | its project home — `<main working tree>/.skill-manager` | the same path |
+| A **main working tree** | `$SKILL_MANAGER_HOME`, else `~/.skill-manager` | n/a — nothing closes it out |
+
+`$SKILL_MANAGER_HOME` is **not** consulted for a worktree, deliberately. It used
+to be the default for both tiers while `close-change.sh` defaulted `--into` to
+`<repo-root>/.skill-manager`, and from a **bare shell** those name different
+homes: measured, bootstrap cloned the operator's 845 MB global home into the
+worktree and `home close-out` then blocked on **17 units before any work
+existed**, printing a remedy that would have synced those global units *into*
+the project home. The launch shims export `SKILL_MANAGER_HOME` and so never met
+it; a human running the scripts by hand did (issue #50).
+
+Two things therefore **refuse** rather than fall back:
+
+- a worktree whose project has **no home yet** — bootstrap it at the project
+  first, because a home cloned from anywhere else cannot be closed into the
+  project;
+- an explicit `--source` that is not the project home.
+
+When the bootstrap refuses, `new-change.sh` **rolls the worktree and its branch
+back**, so the operator's next command is the one the message names rather than
+`worktree path already exists`.
+
+`scripts/selftest.sh` proves both directions on a disposable fixture, from a
+bare shell, against a decoy global home: it asserts by **unit name present /
+absent** which home the worktree's copy came from, so a check that only looked
+for the right unit could not pass a home that carried both. It also pins the
+things that have no other coverage — that a ticket resolves to the same worktree
+from a sibling worktree, that `--dry-run` from *inside* a worktree is answered
+while a real removal from inside it refuses, that a refused bootstrap leaves no
+worktree or branch behind, and that a remedy's conflicted-file list is not
+mangled.
+
 ## Which `skill-manager` a home uses
 
 `home clone`, `home shims`, `home policy`, `home describe` and `exec` are newer
@@ -83,37 +198,65 @@ half-bootstrapped worktree is worse than none.
 ### The pin at `<home>/bin/cli/skill-manager`
 
 That slot decides which build every launch from the home runs. The generated
-launchers and `HomeDescriptor.resolveCli` both consult it before `PATH`, so
-`bootstrap-home.sh` writes an **absolute pin** there naming the build it
-resolved, and re-writes it on every run — including on an already-bootstrapped
-home, without `--force`, because the operator has no way to know the slot is
-wrong. A **frozen** home is never written, here as everywhere else.
+launchers read it and `HomeDescriptor.resolveCli` documents it as rule 3, and
+since `skill-manager` issue #61 there is **no `PATH` fallback behind it** — the
+launcher's last line is `exec "$cli" exec --home …` and the released 0.19.2 on
+`PATH` has no `exec` subcommand, so a `PATH` branch could only ever produce
+`Unmatched arguments: 'exec'`. A wrong or missing pin is therefore not a
+downgrade, it is a home that cannot launch.
 
-Two ways the slot goes wrong, both measured on this repo:
+**`skill-manager home shims` writes it. `bootstrap-home.sh` does not.**
 
-- **Empty.** Every shim falls through to `PATH`, which here is the released
-  0.19.2 — no `exec`, no `home`, no `home close-out`. The shim's
-  `skill-manager exec …` printed "Unmatched arguments" and **exited 0**, so the
-  launch silently did nothing.
-- **Occupied by `home shims`' own generated shim.** That shim resolves via
-  `PATH` by design (it is written to survive the home being copied elsewhere).
-  Newer builds write it during the bootstrap, so a guard of "write the pin only
-  if the slot is empty" saw an occupied slot and skipped — and the home pointed
-  at the released CLI anyway. That is exactly the split observed here: the root
-  home, bootstrapped before `home shims` filled the slot, carries the pin;
-  every constituent home bootstrapped afterwards carried the generated shim.
+It used to, and that was right at the time: `home shims` wrote a
+`PATH`-resolving shim, so homes bootstrapped through this script worked and
+homes provisioned by `home shims` alone died at their last line — and because
+this script masked the difference across a 24-repo onboarding fan-out, nobody
+saw it. Commit `e65962e` fixed `home shims` to write the absolute pin itself,
+derived from the build running it (`RunningCli`), and at that moment two writers
+of one file stopped being a redundancy and became a race with one correct
+answer.
 
-So the pin is written when the slot is empty **and** in place of the generated
-shim, which is not a tool anyone installed. Anything else in that slot is left
-alone — it could be a real CLI dep. The pin deliberately has **no `PATH`
-fallback**: falling through to an older CLI is the behaviour it exists to
-remove, and that CLI answers unknown subcommands with top-level usage and exit
-0, a downgrade that looks like success. If the pinned build disappears the shim
-exits 127 and says how to re-pin.
+This script's predicate lost that race. It decided whether to overwrite by
+grepping the slot for the literal words `home shims` — which the **fixed**
+generated file also contains. Measured: **17 of 25** homes had a correct pin
+replaced by a pin to whatever `pick_cli` had chosen, and an 18th, written before
+the script marked its own output, was not repaired at all. A predicate that keys
+on prose cannot distinguish versions of the prose, which is why the fix
+introduced a stable token — `skill-manager:cli-pin`, `LauncherShims.PIN_MARKER`,
+on line 2 of the generated body.
+
+So `ensure_cli_pin` **verifies, and delegates every repair to the one writer**:
+
+| What is in the slot | What happens |
+|---|---|
+| The `skill-manager:cli-pin` marker | Read the pinned path, check it is executable, **stop**. The file is not this script's to rewrite. |
+| Nothing | Re-run `home shims` |
+| This script's own older pin (`git-integration-repo:cli-pin`, or the unmarked one before it) | Re-run `home shims` |
+| A pre-#61 `PATH`-resolving shim (identified by its `command -v skill-manager`, since it carries no marker) | Re-run `home shims` |
+| Anything else | Left alone — it could be a real CLI dep |
+
+A pin whose target is **gone** is a refusal, not a repair: the script names the
+missing path and the command that re-pins it (`home shims --home <store>`, run
+from the build the home should use) and writes nothing. Substituting a CLI of
+its own choosing is exactly what overwrote the 17.
+
+This runs on an already-bootstrapped home without `--force`, because the
+operator has no way to know the slot is wrong. A **frozen** home is never
+written, here as everywhere else.
+
+`home shims` itself **refuses rather than guessing**: `RunningCli` probes
+`SKILL_MANAGER_CLI`, the running process's own command,
+`SKILL_MANAGER_INSTALL_DIR` and the jar's location, and exits 127 having written
+nothing when none answers. Every candidate `pick_cli` can return is a launcher
+that exports `SKILL_MANAGER_INSTALL_DIR` before it execs the JVM, so the probe
+succeeds — but `bootstrap-home.sh` prints that refusal verbatim rather than
+reducing it to an exit code, because a `$CLI` that is not a launcher (a bare
+`jbang SkillManager.java`) is a configuration mistake that deserves the CLI's
+own diagnostic.
 
 Pinning the slot does **not** retire `close-change.sh`'s help-**text** probe.
-`pick_cli` still falls through to `PATH` when the home's own slot cannot be
-used, and `PATH` is still 0.19.2, so the exit-status trap is still reachable.
+`pick_cli` still consults `PATH` when nothing else answers, and `PATH` here is
+still 0.19.2, so the exit-status trap is still reachable.
 
 ## The one ordering rule
 
@@ -201,8 +344,33 @@ git -C <repo-root> worktree list
 
 ```bash
 skill-manager home close-out --home <wt>/.skill-manager \
-                             --into <repo-root>/.skill-manager --json
+                             --into <main-working-tree>/.skill-manager --json
 ```
+
+`--into` is the project home the worktree's own home was **cloned from** — the
+main working tree's, resolved by the same `project_home` helper
+`bootstrap-home.sh` uses, so where the operator happens to be standing cannot
+change the answer. It used to be `<checkout_root>/.skill-manager`, i.e. `$PWD`'s
+nearest git toplevel, which from inside a sibling worktree named *that*
+worktree's home.
+
+Every remedy names a **resolved CLI path**, not a bare `skill-manager`. A bare
+`skill-manager` on a machine with an older release first on PATH exits 2 for the
+operator who copy-pastes it, and that is the machine this was found on.
+
+The substitution happens in **one** place — `HomeCloseOut` builds the string and
+names the CLI through `HomeDescriptor.resolveCli`, so `--json` and
+`home close-out`'s own human output say the same thing. `close-change.sh`'s only
+contribution is to export `SKILL_MANAGER_CLI` (which `resolveCli` honours first)
+for the gate invocation, passing along the build whose capability `pick_cli` has
+already probed. It renders the remedy verbatim.
+
+It used to rewrite the string with a regex instead, and that was wrong twice: it
+fixed only the `--json` consumer, and its token boundary matched inside
+`skill-manager.toml` — the manifest every unit has, so the most likely conflicted
+file there is — turning the operator's conflict list into a path in a different
+repository. `scripts/selftest.sh` now asserts the remedy's **tail**, not just its
+first token.
 
 and **refuses to remove the worktree** (exit 4) while that verdict is non-zero,
 printing every blocking unit and the exact command that clears it. Run the

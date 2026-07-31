@@ -45,8 +45,12 @@ usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
   --root DIR       Checkout to give a home to. Default: the nearest enclosing
                    git toplevel — which inside a constituent is the
                    CONSTITUENT, not the integration repo tracking its files.
-  --source HOME    Home to clone from. Default: $SKILL_MANAGER_HOME, else
-                   ~/.skill-manager. Only ever read.
+  --source HOME    Home to clone from. Only ever read. Default: for a LINKED
+                   WORKTREE, its project home (the main working tree's), which
+                   is the home close-change.sh reconciles it back into; for a
+                   main working tree, $SKILL_MANAGER_HOME, else ~/.skill-manager.
+                   A --source that disagrees with a worktree's project home is
+                   REFUSED, not silently honoured.
   --policy P       Policy to declare on the new home: live (default) or
                    frozen. A home that is ALREADY frozen is never touched.
   --print-env      Print the launch environment as `export` lines and exit.
@@ -91,14 +95,89 @@ heading() { [ "$QUIET" = 1 ] || step "$*"; }
 ROOT="$(cd "$ROOT" && pwd -P)"
 STORE="$ROOT/.skill-manager"
 
-[ -n "$SOURCE" ] || SOURCE="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}"
-# -P so a symlinked source and a symlinked target cannot compare unequal
-# while naming the same directory.
-[ -d "$SOURCE" ] || die "source home does not exist: $SOURCE"
-SOURCE="$(cd "$SOURCE" && pwd -P)"
-
 GLOBAL_HOME="$HOME/.skill-manager"
 [ -d "$GLOBAL_HOME" ] && GLOBAL_HOME="$(cd "$GLOBAL_HOME" && pwd -P)"
+
+# ------------------------------------------------- which home this clones FROM
+#
+# Issue #50. The source and the close-out destination must be THE SAME HOME BY
+# CONSTRUCTION, and the only thing both scripts can derive it from without
+# consulting the operator's environment is the checkout itself. So:
+#
+#   a LINKED WORKTREE clones from its PROJECT home — <main working tree>/.skill-manager,
+#   which is exactly what close-change.sh reconciles it back into (project_home,
+#   one definition, shared).
+#
+#   a MAIN working tree clones from $SKILL_MANAGER_HOME, else the global home.
+#   That is the root -> project tier: there is no project above it to inherit.
+#
+# The old default was `${SKILL_MANAGER_HOME:-$HOME/.skill-manager}` for BOTH,
+# and from a bare shell that made a worktree unclosable from birth: it cloned
+# the operator's global home (measured: 845 MB) into the worktree, and
+# `home close-out --into <project>/.skill-manager` then blocked on 17 units
+# before any work existed, printing a remedy that would have synced those 17
+# GLOBAL units into the project home. The launch shims export
+# SKILL_MANAGER_HOME and never saw it; a human running the scripts by hand did.
+PROJECT_HOME=""
+project_home "$ROOT" >/dev/null 2>&1 && PROJECT_HOME="$(project_home "$ROOT")"
+[ -n "$PROJECT_HOME" ] && [ -d "$PROJECT_HOME" ] \
+  && PROJECT_HOME="$(cd "$PROJECT_HOME" && pwd -P)"
+
+IS_WORKTREE=0
+is_linked_worktree "$ROOT" && IS_WORKTREE=1 || true
+
+if [ -n "$SOURCE" ]; then
+  SOURCE_ORIGIN="--source"
+elif [ "$IS_WORKTREE" = 1 ]; then
+  # Refuse rather than fall back to the global home. Falling back is the bug:
+  # it produces a worktree whose home came from a place close-out cannot
+  # reconcile it into, and the failure surfaces at teardown, after the work.
+  [ -d "$PROJECT_HOME" ] || die "this is a worktree of $(dirname "$PROJECT_HOME"), and that
+  checkout has no Skill Manager home at
+    $PROJECT_HOME
+  A worktree home is a copy of its PROJECT home, and close-change.sh reconciles
+  it back into that same path. Cloning from anywhere else — the global home
+  included — makes this worktree unclosable from birth (issue #50).
+  Give the project its home first, then re-run:
+    $SCRIPT_DIR/bootstrap-home.sh --root '$(dirname "$PROJECT_HOME")'
+  or name a source deliberately with --source."
+  SOURCE="$PROJECT_HOME"
+  SOURCE_ORIGIN="the project home of $(dirname "$PROJECT_HOME")"
+else
+  SOURCE="${SKILL_MANAGER_HOME:-$GLOBAL_HOME}"
+  SOURCE_ORIGIN="\$SKILL_MANAGER_HOME"
+  [ -n "${SKILL_MANAGER_HOME:-}" ] || SOURCE_ORIGIN="the global home"
+  # A home cannot be cloned from itself, and this is how it happens by
+  # accident: an agent launched through THIS checkout's shims has
+  # SKILL_MANAGER_HOME already pointing at the home being (re-)bootstrapped, so
+  # `scripts/agent-home.sh` — documented as idempotent — died on the
+  # bootstrap-from-itself guard below. The tier above a project home is the
+  # global home, so say so and use it.
+  if [ -d "$SOURCE" ] && [ "$(cd "$SOURCE" && pwd -P)" = "$STORE" ]; then
+    SOURCE="$GLOBAL_HOME"
+    SOURCE_ORIGIN="the global home (\$SKILL_MANAGER_HOME names this checkout's own home)"
+  fi
+fi
+
+# -P so a symlinked source and a symlinked target cannot compare unequal
+# while naming the same directory.
+[ -d "$SOURCE" ] || die "source home does not exist: $SOURCE ($SOURCE_ORIGIN)"
+SOURCE="$(cd "$SOURCE" && pwd -P)"
+
+# The agreement, asserted. Only reachable via an explicit --source, since the
+# defaults above make the two equal by construction — which is the point: this
+# turns the one remaining way to disagree into a refusal instead of a worktree
+# that cannot be closed.
+if [ "$IS_WORKTREE" = 1 ] && [ -n "$PROJECT_HOME" ] && [ "$SOURCE" != "$PROJECT_HOME" ]; then
+  die "refusing to clone this worktree's home from a home it cannot be closed into.
+    source (--source):  $SOURCE
+    close-out --into:   $PROJECT_HOME
+  close-change.sh reconciles <worktree>/.skill-manager INTO the project home, so
+  a home cloned from anywhere else arrives holding units that home never had —
+  every one of them a blocker at teardown (issue #50). Drop --source to use the
+  project home, or bootstrap the project home from $SOURCE first so the two
+  agree."
+fi
 
 # The guard. A bootstrap that can target the operator's own home is not a
 # bootstrap, it is the bug — so the refusals come before anything is read,
@@ -195,78 +274,178 @@ for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME"):
 }
 
 # ------------------------------------------------------------- the CLI pin
-
+#
 # <home>/bin/cli/skill-manager decides which build every launch from this home
-# runs. Both readers already exist — the generated launcher checks it before
-# PATH, and HomeDescriptor.resolveCli documents it as rule 3.
+# runs: the generated launchers read it, and HomeDescriptor.resolveCli
+# documents it as rule 3. Since issue #61 the launchers have NO PATH fallback
+# at all, so a wrong or missing pin is not a downgrade, it is a home that
+# cannot launch.
 #
-# Two ways it goes wrong, and the second is why this is a function rather than
-# a line inside the clone block:
+# THIS SCRIPT NO LONGER WRITES THAT FILE.
 #
-#   * Empty. Every shim falls through to PATH, which on this machine is the
-#     released 0.19.2 — no `exec`, no `home`, no `home close-out`. The shims
-#     then fail unless the caller exports SKILL_MANAGER_CLI, which is the very
-#     thing the shims exist to avoid.
-#   * Occupied by `home shims`' own generated shim, which RESOLVES VIA PATH by
-#     design (it is written to stay valid if the home is copied elsewhere).
-#     Newer builds write it during step 5 above, so the old
-#     `[ ! -e ]` guard saw an occupied slot and skipped the pin — and the home
-#     ended up pointing at the released CLI anyway. Measured: the root home,
-#     bootstrapped before `home shims` filled the slot, carries the absolute
-#     pin; every constituent home bootstrapped after it carries the
-#     PATH-resolving shim and therefore finds 0.19.2. That version answers
-#     `home close-out --help` with top-level usage and exit 0, which is the
-#     whole reason close-change.sh probes help TEXT instead of exit status.
+# It used to, and it was right to: `skill-manager home shims` wrote a
+# PATH-RESOLVING shim, and PATH's skill-manager on this machine is the released
+# 0.19.2 — which has no `exec` subcommand, so every generated launcher ended in
+# `Unmatched arguments: 'exec'`. Homes bootstrapped through this script worked
+# and homes provisioned by `home shims` alone did not, and because this script
+# masked the difference for the whole 24-repo onboarding fan-out, nobody saw
+# it.
 #
-# So: write the pin when the slot is empty, and REPLACE the generated
-# PATH-resolving shim, which is not a tool anyone installed. Anything else in
-# that slot is left alone — it could be a real CLI dep.
+# skill-manager fixed it (issue #61, commit e65962e): `home shims` now writes
+# the absolute pin itself, derived from the build that is running it
+# (RunningCli), with no PATH fallback. At that moment two writers of one file
+# stopped being a redundancy and became a race with exactly one correct answer
+# — and this script's predicate lost it. It decided whether to overwrite by
+# grepping the slot for the literal words `home shims`, which the FIXED
+# generated file also contains. Measured: 17 of 25 homes had a correct pin
+# replaced with a pin to whatever `pick_cli` had chosen, and an 18th — written
+# before this script marked its own output — was not repaired at all. A
+# predicate that keys on prose cannot distinguish versions of the prose.
 #
-# Deliberately absolute, and deliberately without a PATH fallback: falling back
-# is the behaviour being removed, and a silent downgrade to a CLI missing whole
-# subcommands is worse than a loud failure.
+# So `ensure_cli_pin` VERIFIES, and delegates every repair to the one writer:
+#
+#   marker present   -> check the pinned target is executable, and STOP.
+#   absent, or ours,
+#   or a pre-#61
+#   PATH shim        -> re-run `home shims`. Never write the body here.
+#   anything else    -> someone else's tool. Leave it alone.
+
+# The token LauncherShims.PIN_MARKER puts on line 2 of the generated
+# entrypoint, existing precisely so a predicate has something stable to key on.
+# Checked against the generated BYTES, not against the javadoc that names it:
+# a predicate that matches nothing fails silently, and that is this function's
+# entire failure history.
+GENERATED_PIN_MARKER='skill-manager:cli-pin'
+
+# The generated pin's assignment line is, verbatim,
+#   cli="${SKILL_MANAGER_CLI:-<absolute path>}"
+# Matched as a FIXED string and stripped with parameter expansion rather than
+# parsed with a regex: `${`, `:-`, `}` and `$` are each metacharacters in some
+# dialect of some grep or sed, and a pattern that quietly matches nothing here
+# means the pin is never checked at all.
+GENERATED_PIN_PREFIX='cli="${SKILL_MANAGER_CLI:-'
+
+# What `home shims` generated BEFORE #61: a shim that searched PATH with its
+# own directory filtered out. It carries no marker of its own — the marker
+# above was added by the fix — so the search itself is the only thing that
+# identifies it, and it is the shape most likely still sitting in an
+# already-bootstrapped home on this machine.
+PATH_SHIM_MARKER='command -v skill-manager'
+
+# What THIS script wrote while it was still a writer, and (LEGACY) what an even
+# older version wrote before it marked its own output. Both are stale by
+# construction now: they pin whatever `pick_cli` chose at the time rather than
+# the build `home shims` ran as, and neither is re-derived when the build
+# moves.
+#
+# LEGACY_PIN_MARKER is kept deliberately. Without it `ensure_cli_pin` cannot
+# recognise its own past output and takes the "someone else's tool" branch — so
+# the homes most likely to carry a stale pin become the only ones it refuses to
+# repair. That gap was measured once already (16 homes repaired by re-running
+# this script, the 17th and oldest silently not), and dropping the marker while
+# rewriting the function would re-open it for exactly those homes.
 PIN_MARKER='git-integration-repo:cli-pin'
+LEGACY_PIN_MARKER="Written by git-integration-repo's bootstrap-home.sh"
+
+# `home shims` writes the launchers AND the pin, and it REFUSES rather than
+# guessing: RunningCli probes SKILL_MANAGER_CLI, the running process's own
+# command, SKILL_MANAGER_INSTALL_DIR and the jar's own location, and when none
+# of them answers it exits 127 having written NOTHING. That is the right
+# behaviour — the PATH fallback is what #61 removed — but it means a caller
+# that swallows the output reports a bare 127 for the one failure the CLI took
+# care to explain.
+#
+# Every candidate `pick_cli` can return is a launcher that exports
+# SKILL_MANAGER_INSTALL_DIR before it execs the JVM, because that is how each
+# distribution finds its bundled gateway sources: a source checkout is
+# `<repo>/skill-manager` and a release/Homebrew install is
+# `<prefix>/bin/skill-manager`, and RunningCli probes both layouts. Verified on
+# this machine — `pick_cli` resolves the integration parent's
+# constituents/skill-manager/skill-manager, which exports the variable, and
+# `home shims` pins it. What the probe cannot survive is a $CLI that is not a
+# launcher at all (a bare `jbang SkillManager.java`, a wrapper that drops the
+# variable). That is a configuration mistake rather than a defect, so it gets a
+# diagnostic naming the fix instead of a 127 with no context.
+write_shims() {
+  local out status=0
+  out="$("$CLI" home shims --home "$STORE" 2>&1)" || status=$?
+  [ "$status" = 0 ] && return 0
+  die "\`home shims\` failed (exit $status), so $STORE has no launcher shims and
+  no CLI pin — it writes nothing when it cannot identify the running build.
+  The command was:
+    $CLI home shims --home '$STORE'
+  and it said:
+
+$out
+
+  If that is about identifying which build is running, \$CLI has to be a
+  skill-manager LAUNCHER — one that exports SKILL_MANAGER_INSTALL_DIR before it
+  execs the JVM — not the jbang entrypoint underneath one. Set
+  SKILL_MANAGER_CLI to such a launcher and re-run."
+}
 
 ensure_cli_pin() {
-  local slot="$STORE/bin/cli/skill-manager" why=""
-  if [ ! -e "$slot" ]; then
-    why="empty"
-  elif command grep -q -F "$PIN_MARKER" "$slot" 2>/dev/null; then
-    why="refreshing this script's own pin"
-  elif command grep -q -F 'home shims' "$slot" 2>/dev/null; then
-    why="replacing the PATH-resolving shim from \`home shims\`"
-  else
-    return 0    # someone else's tool; not ours to overwrite
+  local slot="$STORE/bin/cli/skill-manager"
+
+  # 1. Written by `home shims`. Not ours: verify, never rewrite.
+  if command grep -q -F -- "$GENERATED_PIN_MARKER" "$slot" 2>/dev/null; then
+    local line pinned
+    line="$(command grep -m1 -F -- "$GENERATED_PIN_PREFIX" "$slot" 2>/dev/null || true)"
+    [ -n "$line" ] && pinned="${line#*"$GENERATED_PIN_PREFIX"}" || pinned=""
+    pinned="${pinned%\"}"; pinned="${pinned%\}}"
+    [ -n "$pinned" ] || die "$slot carries the '$GENERATED_PIN_MARKER' marker but no
+  readable '$GENERATED_PIN_PREFIX…' line, so the pinned CLI cannot be checked.
+  Either the file is truncated or \`home shims\` changed the shape this script
+  reads. Re-provision it with
+    $CLI home shims --home '$STORE'
+  and if the shape has genuinely changed, fix GENERATED_PIN_PREFIX here rather
+  than letting the check pass on nothing."
+    [ -x "$pinned" ] || die "the CLI pinned for $STORE is missing or not executable:
+    $pinned
+  Every launch from this home exits 127 until it is re-pinned; there is
+  deliberately no PATH fallback. Re-pin it from the build this home should use:
+    <that build>/skill-manager home shims --home '$STORE'
+  This script will not repair it by writing the file itself — substituting a
+  CLI of its own choosing is what overwrote 17 correct pins."
+    say "cli pin:   $slot -> $pinned (pinned by \`home shims\`; left as written)"
+    return 0
   fi
-  say "cli pin:   $slot ($why) -> $CLI"
-  mkdir -p "$STORE/bin/cli"
-  cat > "$slot" <<EOF
-#!/usr/bin/env bash
-# $PIN_MARKER — written by git-integration-repo's bootstrap-home.sh.
-#
-# The skill-manager build that goes with THIS home. The launcher shims and
-# HomeDescriptor.resolveCli both look here before PATH, so a home does not
-# depend on whichever version happens to be installed globally — the released
-# CLI on PATH can be older than the build the home was created with and lack
-# whole subcommands (\`exec\`, \`home\`, \`home close-out\`).
-#
-# There is no PATH fallback on purpose. Falling through to an older CLI is the
-# failure this file exists to remove, and that CLI answers unknown subcommands
-# with top-level usage and exit 0 — a downgrade that looks like success.
-set -euo pipefail
-cli="\${SKILL_MANAGER_CLI:-$CLI}"
-if [ ! -x "\$cli" ]; then
-  echo "skill-manager: the CLI pinned for this home is missing or not executable:" >&2
-  echo "  \$cli" >&2
-  echo "  Re-pin it: bootstrap-home.sh --root '$ROOT' --force" >&2
-  exit 127
-fi
-exec "\$cli" "\$@"
-EOF
-  chmod +x "$slot"
+
+  # 2. Shapes this script is entitled to replace — and replaces by asking the
+  #    one writer, not by writing.
+  local why=""
+  if [ ! -e "$slot" ]; then
+    why="absent"
+  elif command grep -q -F -- "$PIN_MARKER" "$slot" 2>/dev/null; then
+    why="this script's own pin, from when it was a writer"
+  elif command grep -q -F -- "$LEGACY_PIN_MARKER" "$slot" 2>/dev/null; then
+    why="this script's own pin, from before it marked its output"
+  elif command grep -q -F -- "$PATH_SHIM_MARKER" "$slot" 2>/dev/null; then
+    why="a pre-#61 PATH-resolving shim from \`home shims\`"
+  else
+    say "cli pin:   $slot (not written by this script or by \`home shims\` — left alone)"
+    return 0
+  fi
+  say "cli pin:   $slot ($why) -> re-running \`home shims\`"
+  write_shims
+  # `home shims` reporting success is not the same as the slot being correct,
+  # and this whole function exists because nobody checked the difference.
+  command grep -q -F -- "$GENERATED_PIN_MARKER" "$slot" 2>/dev/null \
+    || die "\`home shims\` exited 0 but $slot still carries no
+  '$GENERATED_PIN_MARKER' marker, so the repair did not happen. Inspect the
+  file; do not re-run and hope."
 }
 
 bootstrapped=0; frozen_skip=0
+# Whether THIS run actually ran `home clone`. Distinct from `bootstrapped`, and
+# the distinction is the #38 defect: the closing caveat about skipped directories
+# was gated on `bootstrapped`, which stays 0 on the `--force` path — so
+# `--force` against an existing non-empty home printed "The home is a clone:
+# cache/, tmp/, logs/, venvs/, tools/ and npm/ were not copied" about a clone
+# that had not happened, and named a `sync --force-scripts` remedy for shims
+# that were never broken. `--force` is exactly the invocation the onboarding
+# recipe uses, so it was the common case rather than the edge one.
+cloned=0
 if [ -e "$STORE/home.runtime.json" ]; then
   existing="$(home_policy)"
   if [ "$existing" = "frozen" ]; then
@@ -288,8 +467,12 @@ fi
 
 if [ "$bootstrapped" = 0 ]; then
   heading "Bootstrapping a Skill Manager home for $ROOT"
-  say "source:    $SOURCE"
+  say "source:    $SOURCE  ($SOURCE_ORIGIN)"
   say "cli:       $CLI"
+  # Printed for a worktree because it is the fact the operator cannot otherwise
+  # see, and the one #50 got wrong: this home will have to reconcile back into
+  # exactly the home it came from.
+  [ "$IS_WORKTREE" = 1 ] && say "close-out into: $PROJECT_HOME  (same home — issue #50)" || true
 
   need_clone=1
   if [ -e "$STORE" ]; then
@@ -311,6 +494,7 @@ if [ "$bootstrapped" = 0 ]; then
   if [ "$need_clone" = 1 ]; then
     "$CLI" home clone --from "$SOURCE" --to "$STORE" \
       || die "home clone failed; $STORE is not usable"
+    cloned=1
   fi
 
   # 2. From here on, every command binds to the clone.
@@ -325,11 +509,15 @@ if [ "$bootstrapped" = 0 ]; then
   #    script decides. HomeDescriptor.envFor owns that layout.
   descriptor_env_dirs | while IFS= read -r dir; do [ -n "$dir" ] && mkdir -p "$dir"; done
 
-  # 5. Launcher shims, then the descriptor last so it records the finished
-  #    state (policy, resolved CLI, gateway ownership, unit snapshot).
-  "$CLI" home shims --home "$STORE" >/dev/null || die "could not write the launcher shims"
+  # 5. Launcher shims AND the CLI pin — one command writes both, and since #61
+  #    the pin it writes is the absolute path of the build running right here.
+  #    Through write_shims so its refusal is reported rather than reduced to an
+  #    exit code.
+  write_shims
 
-  # 5b. see ensure_cli_pin below — it runs for existing homes too.
+  # 5b. Assert what step 5 just claimed. ensure_cli_pin no longer writes
+  #     anything on this path; it reads the marker `home shims` left and checks
+  #     the pinned build is still there. It runs for existing homes too, below.
   ensure_cli_pin
 
   "$CLI" home describe --home "$STORE" --home-root "$ROOT" --write >/dev/null \
@@ -347,12 +535,13 @@ fi
 
 export SKILL_MANAGER_HOME="$STORE"
 
-# Repair an ALREADY-bootstrapped home too. Homes created before this pin
-# existed — or created after `home shims` started filling the slot itself —
-# carry the PATH-resolving shim and quietly run whatever CLI is installed
-# globally. Re-running bootstrap-home.sh should fix that without --force,
-# because the operator has no way to know the slot is wrong. A frozen home is
-# evidence and is never written, here as everywhere else.
+# Check — and where it is this script's business, repair — an ALREADY-bootstrapped
+# home too. Homes provisioned before #61 carry the PATH-resolving shim and
+# quietly run whatever CLI is installed globally; homes provisioned by an older
+# version of this script carry a pin it chose. Re-running bootstrap-home.sh
+# should fix both without --force, because the operator has no way to know the
+# slot is wrong. A frozen home is evidence and is never written, here as
+# everywhere else.
 if [ "$bootstrapped" = 1 ] && [ "$frozen_skip" = 0 ]; then
   ensure_cli_pin
 fi
@@ -390,18 +579,25 @@ verify() {
     || die "verify: CLAUDE_CONFIG_DIR still points at the operator's ~/.claude"
 
   # A shim must work with NO environment help — that is its entire purpose.
-  # It resolves its CLI as SKILL_MANAGER_CLI, then <home>/bin/cli/skill-manager,
-  # then PATH, so at least one of the last two has to be a capable build or
-  # every launch from this home fails at exec time.
-  local home_cli="$STORE/bin/cli/skill-manager" path_cli
-  path_cli="$(command -v skill-manager || true)"
-  if [ -x "$home_cli" ] && cli_has_home "$home_cli"; then :
-  elif [ -n "$path_cli" ] && cli_has_home "$path_cli"; then :
-  else
-    die "verify: the shims in $STORE/bin/launch cannot find a usable skill-manager.
-  Neither $home_cli nor a CLI on PATH answers \`home clone\`, so every launch
-  from this home would fail unless the caller exports SKILL_MANAGER_CLI."
-  fi
+  # Since #61 it resolves its CLI as SKILL_MANAGER_CLI, then
+  # <home>/bin/cli/skill-manager, and then NOTHING. The PATH branch is gone
+  # because the launcher's last line is `exec "$cli" exec --home …` and the
+  # released CLI on PATH has no `exec` subcommand, so that branch could only
+  # ever produce `Unmatched arguments: 'exec'`.
+  #
+  # This check used to accept "some capable skill-manager exists on PATH" as
+  # the alternative. It is not one any more, and keeping it would pass a home
+  # whose every launch exits 127 — the false green this file exists to remove.
+  # The pin itself is the launch surface now, so it is asserted directly.
+  local home_cli="$STORE/bin/cli/skill-manager"
+  [ -x "$home_cli" ] || die "verify: $home_cli is missing or not executable, so every
+  launch from this home exits 127 — the shims have no PATH fallback to reach
+  for. Re-provision it with
+    $CLI home shims --home '$STORE'"
+  cli_has_home "$home_cli" || die "verify: $home_cli does not answer \`home clone\`,
+  so the build it pins is older than the commands this home needs. Re-pin it
+  from the build this home should run:
+    <that build>/skill-manager home shims --home '$STORE'"
 
   # claude/codex must resolve to THIS home's shims. Resolving to another
   # home's bin/ is the failure mode LaunchEnv prunes for, so check it on the
@@ -462,8 +658,9 @@ or put the shims on PATH for this shell:
   eval "\$($SCRIPT_DIR/bootstrap-home.sh --root $ROOT --print-env)"
 EOF
 
-# Only after a clone: the skipped-directory caveat is about what just happened.
-[ "$QUIET" = 1 ] || [ "$bootstrapped" = 1 ] || cat >&2 <<EOF
+# Only after a clone actually ran: the caveat is about what just happened, so it
+# is gated on `cloned`, not on `bootstrapped`. See the note beside `cloned=0`.
+[ "$QUIET" = 1 ] || [ "$cloned" = 0 ] || cat >&2 <<EOF
 
 The home is a clone: cache/, tmp/, logs/, venvs/, tools/ and npm/ were not
 copied. Any CLI shim whose target lived under one of those is reported by the

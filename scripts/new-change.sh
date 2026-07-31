@@ -145,13 +145,50 @@ if [ "$SKIP_HOME" = 1 ]; then
 else
   step "Giving the worktree its own Skill Manager home"
   if ! "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT"; then
+    # ROLL THE WORKTREE BACK. Leaving it was the wrong half of a two-step
+    # operation: the worktree and the branch survived, `new-change.sh <TICKET>`
+    # then refused with "worktree path already exists", and the recovery
+    # (close-change.sh) was named nowhere. The most common cause is a project
+    # with no home yet — 17 of this repo's 24 constituents — so the state an
+    # operator lands in matters more than the rarity of the failure.
+    #
+    # Removal is safe precisely here and nowhere else: this worktree was created
+    # seconds ago by this script, nothing has been edited in it, and the home
+    # bootstrap FAILED so there is no home in it to lose. That is the one case
+    # close-change.sh's gate would also wave through, so this is not a bypass of
+    # it.
+    rolled_back=0
+    if git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null; then
+      git -C "$ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true
+      rolled_back=1
+    fi
     cat >&2 <<EOF
 
-The worktree exists at $WT but has NO home of its own, so an agent started in
-it would read and write the operator's global home. Fix the cause above and
-re-run:
-  $SCRIPT_DIR/bootstrap-home.sh --root "$WT"
-or, if this worktree will never host an agent, re-create it with --no-home.
+No home could be created for this worktree, so an agent started in it would
+read and write the operator's GLOBAL home. The cause is printed above, and the
+remedy that clears it is in that message — it is usually that this repo has no
+project home yet, which one command fixes:
+
+  $SCRIPT_DIR/bootstrap-home.sh --root "$ROOT"
+  $0 $TICKET${BASE:+ $BASE}
+EOF
+    if [ "$rolled_back" = 1 ]; then
+      cat >&2 <<EOF
+
+The worktree and branch $BRANCH were removed, so re-running the line above
+works as if this attempt had not happened.
+EOF
+    else
+      cat >&2 <<EOF
+
+The worktree at $WT could NOT be rolled back automatically. Remove it before
+re-running, through the gate rather than by hand:
+  $SCRIPT_DIR/close-change.sh "$TICKET"
+EOF
+    fi
+    cat >&2 <<EOF
+
+Or, if this worktree will never host an agent, create it with --no-home.
 EOF
     exit 3
   fi

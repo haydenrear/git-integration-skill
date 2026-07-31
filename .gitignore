@@ -1,2 +1,22 @@
 .DS_Store
 *.swp
+
+# This checkout's own Skill Manager home and the three agent homes beside it.
+#
+# Created by this repo's OWN scripts/bootstrap-home.sh, which is the only
+# implementation of the sequence. Never committed: a home is machine-local
+# state (absolute paths in home.runtime.json, a pinned CLI, installed unit
+# trees), and committing one would hand every other checkout this machine's
+# paths.
+#
+# These live in the CONSTITUENT rather than in an integration parent's root
+# .gitignore because they are this repository's own concern:
+# `git-integration-repo` is a standalone repo with its own remote, and it is
+# the repo whose script an agent runs to create a home in the first place, so
+# it must be safe to bootstrap in place. INTEGRATION.md rule 2 forbids the
+# reverse — putting a PARENT-only concern inside a constituent — which is not
+# what these are.
+.skill-manager/
+.claude/
+.codex/
+.gemini/
