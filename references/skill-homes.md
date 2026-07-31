@@ -342,7 +342,7 @@ somebody has read it.
 
 - The refusal is **exit 8**, before anything is spawned, with a report of what
   moved. A gate that fired after the launch would have already failed to gate.
-- `home drift --show` prints the pending change; `home drift --ack` clears it and
+- Bare `home drift` prints the pending change; `home drift --ack` clears it and
   the next launch proceeds. `--ack-drift` on a single `skill-manager exec`
   acknowledges in passing. Run them through the home's own
   `bin/cli/skill-manager`, not a bare `skill-manager` — same reason every remedy
@@ -624,5 +624,5 @@ Two measured consequences worth knowing before you rely on the in-repo copy:
    remember and nothing to **export** — which is a statement about the
    environment, not a promise that the first launch will proceed. Expect the
    change-awareness gate (exit 8) on a new worktree and clear it with
-   `skill-manager home drift --show` then `--ack`; see
+   bare `skill-manager home drift`, then the same command plus `--ack`; see
    [the first launch is gated](#the-first-launch-is-gated-on-change-awareness-exit-8).

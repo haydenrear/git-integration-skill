@@ -549,6 +549,64 @@ check "$(yesno command grep -q 'argv=\[home close-out --home' "$STUB_LOG")" \
   "the CLI behind the pin never saw the gate call; it recorded:
       $(command sed 's/^/        /' "$STUB_LOG" 2>/dev/null || printf '        <nothing>')"
 
+# --------------------------------------------- the remedies this repo PRINTS
+#
+# Every `skill-manager <sub> --<opt>` this repo tells an operator to run must be
+# a command that actually parses. This is not hypothetical: `home drift --show`
+# shipped in FIVE places here -- new-change.sh's own closing banner, SKILL.md,
+# worktrees.md and skill-homes.md twice -- and the option never existed. It
+# exits 2 with `Unknown option`. That string is what a BLOCKED agent is told to
+# run, so the one instruction that had to work was the one that did not.
+#
+# It is the third time this class has shipped. skill-manager grew an executable
+# sweep over its own sources for it; this is the same invariant for the strings
+# that live over here, which that sweep cannot see.
+#
+# Scoped to `--` options rather than whole command lines on purpose: a full
+# parse would need every placeholder (`$WT`, `<that home>`, `<TICKET>`) resolved,
+# and a check that cannot run is worse than no check. The option name is the
+# part that was wrong all three times.
+
+step "Every skill-manager option this repo prints is one the CLI accepts"
+
+SWEPT=0
+UNKNOWN=""
+# `home drift --ack` -> subcommand "home drift", option "--ack". Read from the
+# tracked files only, so scratch logs and this file's own examples cannot seed it.
+while IFS= read -r pair; do
+  sub="${pair%%|*}"; opt="${pair##*|}"
+  [ -n "$sub" ] && [ -n "$opt" ] || continue
+  SWEPT=$((SWEPT + 1))
+  # shellcheck disable=SC2086
+  if ! "$CLI" $sub --help 2>&1 | command grep -q -- "$opt"; then
+    UNKNOWN="${UNKNOWN}    $sub $opt"$'\n'
+  fi
+done < <(
+  # Both shapes, because both are printed here: a one-word subcommand
+  # (`exec --print-env`, `sync --force-scripts`) and a two-word one
+  # (`home close-out --home`, `project resolve --project-dir`). Keying only on
+  # the two-word shape is how the first draft of this check matched 4 of the 7
+  # strings that exist -- caught by the vacuity guard below, which is the only
+  # reason this comment is accurate.
+  cd "$SCRIPT_DIR/.." && git ls-files -z 2>/dev/null \
+    | xargs -0 command grep -ohE 'skill-manager [a-z][a-z-]*( [a-z][a-z-]+)? --[a-z][a-z-]+' 2>/dev/null \
+    | command sed -E 's/^skill-manager //; s/ (--[a-z-]+)$/|\1/' \
+    | sort -u
+)
+
+# Vacuity guard FIRST. A sweep that matched nothing -- or matched only some of
+# the shapes -- would report a clean result forever, which is exactly the
+# failure mode this whole file exists to refuse. The floor is deliberately just
+# under the current count: it must fail if the extraction silently narrows.
+check "$(yesno test "$SWEPT" -ge 6)" \
+  "the_option_sweep_actually_found_commands_to_check" \
+  "the sweep matched $SWEPT option(s); it is not looking at the right files"
+
+check "$(yesno test -z "$UNKNOWN")" \
+  "every_skill_manager_option_this_repo_prints_is_accepted_by_the_cli" \
+  "these are printed as instructions but the CLI rejects them:
+$UNKNOWN"
+
 # ------------------------------------------------------------------- verdict
 
 step "Result"
