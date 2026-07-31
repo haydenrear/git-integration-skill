@@ -77,6 +77,14 @@ WT=../<repo>-TICKET-123
 $WT/.skill-manager/bin/launch/claude
 #    See references/skill-homes.md. Nothing to export; the shim applies the
 #    whole launch contract.
+#
+#    That first launch may still be REFUSED with exit 8: a home whose units
+#    changed gates the next launch until the change has been read. It is a
+#    working home, not a broken one. Read and clear it, then launch again —
+#    through the home's OWN cli entrypoint, since a bare `skill-manager` may be
+#    an older release:
+$WT/.skill-manager/bin/cli/skill-manager home drift --show
+$WT/.skill-manager/bin/cli/skill-manager home drift --ack
 
 # 2. Make the change across constituents in the worktree. Use the composed
 #    skills here: write/adjust tla-spec-dev specs, spec unit tests, and

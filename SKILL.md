@@ -133,6 +133,10 @@ $S/new-change.sh TICKET-123                        # worktree on feature/TICKET-
 #      a nested repo's worktree never lands in the parent's constituents/.
 #   ...also bootstraps the worktree's OWN home; launch agents via
 #      ../<repo>-TICKET-123/.skill-manager/bin/launch/claude
+#      That first launch may be REFUSED with exit 8 — skill-manager gates a
+#      launch from a home whose units changed until the change has been read.
+#      Clear it with `<that home>/bin/cli/skill-manager home drift --show`
+#      then `--ack`. See references/skill-homes.md.
 #   ...edit in the worktree, commit to the feature branch...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
 
@@ -141,8 +145,10 @@ $S/close-change.sh TICKET-123                      # gate on `home close-out`, T
 #   refuses (exit 4) while the worktree's home still holds unit work, naming
 #   each blocker and the command that clears it. HomeCloseOut names a resolved
 #   CLI path in every remedy (never a bare `skill-manager`, which on a machine
-#   with an older release on PATH exits 2); this script only passes it the build
-#   it verified. --force discards deliberately. --dry-run works from inside the
+#   with an older release on PATH exits 2); this script supplies the environment
+#   that resolution runs in — and NEVER names a home's own `bin/cli` pin in
+#   $SKILL_MANAGER_CLI, which would tell that pin to exec itself forever.
+#   --force discards deliberately. --dry-run works from inside the
 #   worktree; a real removal from inside it refuses.
 #   --into defaults to the project home the worktree was cloned FROM, wherever
 #   you are standing when you run it.

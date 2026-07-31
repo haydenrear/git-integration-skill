@@ -255,8 +255,41 @@ reducing it to an exit code, because a `$CLI` that is not a launcher (a bare
 own diagnostic.
 
 Pinning the slot does **not** retire `close-change.sh`'s help-**text** probe.
-`pick_cli` still consults `PATH` when nothing else answers, and `PATH` here is
-still 0.19.2, so the exit-status trap is still reachable.
+`pick_cli` still consults `PATH` when nothing else answers. From a bare shell
+that is the released 0.19.2, so the exit-status trap is still reachable; from
+inside an agent session it is *another home's pin*, because `skill-manager exec`
+puts `<home>/bin/cli` first on the launch `PATH`.
+
+#### The pin resolves itself through `$SKILL_MANAGER_CLI`, so do not point that at it
+
+The generated body is `cli="${SKILL_MANAGER_CLI:-<absolute>}"` followed by
+`exec "$cli" "$@"`. The variable is honoured **first** so a harness can redirect
+the pin at a build of its own; the absolute default is what makes the pin a pin.
+Naming the pin itself in that variable therefore throws away the target it
+already knows and replaces it with a path to itself, and it re-execs **forever**
+— no output, no exit, one process burning a core.
+
+This is not hypothetical and it is not a corner: `pick_cli` in both
+`bootstrap-home.sh` and `close-change.sh` *prefers* the home's own pin, and
+`exec` puts a pin first on an agent session's `PATH`, so "the CLI I picked" and
+"the CLI that must not be named in that variable" are usually the same file.
+`close-change.sh` shipped exactly that pairing for one epic; see
+[Teardown](#teardown-including-at-epic-close).
+
+Rules for anything that invokes a chosen CLI:
+
+- Decide **per candidate**. The variable is still what makes a remedy printed by
+  a non-self-pinning launcher name a runnable path.
+- **Scrub an inherited value**, do not merely refrain from setting one. The
+  livelock does not care who exported it.
+- Do not assume a candidate is safe because it came from `PATH`, and do not
+  identify the hazard by path alone — inside an agent session the `PATH` answer
+  is a pin belonging to a home the caller has never heard of. The reliable
+  predicate is the candidate's own bytes: does it *expand*
+  `$SKILL_MANAGER_CLI`?
+- Do not rely on the CLI to defend itself. A guard added to the shim today is
+  absent from every home already pinned by an older build, which is most of the
+  homes a teardown will ever meet.
 
 ## The one ordering rule
 
@@ -288,6 +321,54 @@ Two consequences worth stating:
   1.3 GB). Any CLI shim whose target was under one of those is reported by the
   clone and re-provisioned with
   `SKILL_MANAGER_HOME=<store> skill-manager sync --force-scripts`.
+
+## The first launch is gated on change awareness (exit 8)
+
+A bootstrapped home is not the same thing as a home you can launch from. There
+is one more gate, it belongs to `skill-manager` rather than to these scripts,
+and **it is the first thing an operator meets after `new-change.sh` returns**.
+
+### What it is for
+
+An agent reads a skill, then works for twenty minutes on the strength of it. A
+sync, a pull, or a fresh clone replaces that skill underneath it. Nothing fails
+and nothing warns, and the agent keeps following instructions that no longer
+exist. The only boundary at which that can still be said out loud is between
+"the home changed" and "something starts using the home" — which is a launch. So
+a change to a home's units is recorded, and the next launch **refuses** until
+somebody has read it.
+
+### The operator-visible contract
+
+- The refusal is **exit 8**, before anything is spawned, with a report of what
+  moved. A gate that fired after the launch would have already failed to gate.
+- `home drift --show` prints the pending change; `home drift --ack` clears it and
+  the next launch proceeds. `--ack-drift` on a single `skill-manager exec`
+  acknowledges in passing. Run them through the home's own
+  `bin/cli/skill-manager`, not a bare `skill-manager` — same reason every remedy
+  on this page names a resolved path.
+- Acknowledgement is the **only** thing that retires it. Re-recording a digest
+  does not: the record is a fact about a change that happened, not a statement
+  about whether the home is currently self-consistent.
+- The launcher shims (`bin/launch/{claude,codex,gemini}`) take the gated path,
+  deliberately. `bootstrap-home.sh`'s own internal `exec` calls pass
+  `--ack-drift`, so **the bootstrap verifying a home cannot tell you whether the
+  operator's next command will be refused**.
+
+### When a freshly provisioned worktree hits it
+
+Measured on a disposable fixture: a worktree cloned from a project home whose
+content had moved since that home last recorded a digest comes up with a pending
+record, and `skill-manager exec --home <wt>/.skill-manager -- …` exits 8 with
+`refusing to launch: … changed and the change has not been read.` Cloned from a
+home whose digest was current, the same sequence exits 0.
+
+"Content moved since the last recorded digest" is the ordinary state of a home
+anyone is working in, so **expect the gate on a new worktree and do not read it
+as a broken bootstrap**. Do not, however, encode "always" into a checklist: the
+gate is a function of the source home's recorded state, both outcomes are
+correct, and the exact conditions are `skill-manager`'s to change. Read the
+report, acknowledge it, launch.
 
 ## `propagate.sh` and skill push-back are different flows
 
@@ -360,10 +441,9 @@ operator who copy-pastes it, and that is the machine this was found on.
 
 The substitution happens in **one** place — `HomeCloseOut` builds the string and
 names the CLI through `HomeDescriptor.resolveCli`, so `--json` and
-`home close-out`'s own human output say the same thing. `close-change.sh`'s only
-contribution is to export `SKILL_MANAGER_CLI` (which `resolveCli` honours first)
-for the gate invocation, passing along the build whose capability `pick_cli` has
-already probed. It renders the remedy verbatim.
+`home close-out`'s own human output say the same thing. `close-change.sh`
+renders the remedy verbatim and contributes only the *environment* that
+resolution runs in.
 
 It used to rewrite the string with a regex instead, and that was wrong twice: it
 fixed only the `--json` consumer, and its token boundary matched inside
@@ -371,6 +451,47 @@ fixed only the `--json` consumer, and its token boundary matched inside
 file there is — turning the operator's conflict list into a path in a different
 repository. `scripts/selftest.sh` now asserts the remedy's **tail**, not just its
 first token.
+
+#### That environment is decided per candidate, and this is where it bit
+
+`resolveCli`'s rules are, in order: `$SKILL_MANAGER_CLI`; the running process's
+own command, when it looks like a launcher (a jbang/JVM process does not);
+`<store>/bin/cli/skill-manager`; then a bare `skill-manager` off `PATH`. So when
+`pick_cli` answers with a checkout's or the integration parent's launcher, the
+export is what keeps a remedy off that last rule — and a bare `skill-manager`
+here is the released 0.19.2, which exits 2 for whoever copy-pastes it.
+
+For a while this page said the export *was* the script's contribution, full
+stop. That stopped being true the moment `home shims` began writing a pin that
+honours the same variable: `pick_cli`'s **preferred** candidate is the home's
+own pin, and
+
+```bash
+SKILL_MANAGER_CLI="$CLI" "$CLI" home close-out …      # WRONG when $CLI is a pin
+```
+
+tells that pin to exec itself, forever. Measured on the epic #2 pilot: 7:03 of
+CPU over 13:06 of wall clock from one teardown, silently — a teardown that hangs
+is indistinguishable from a teardown that is slow, which on a fan-out means it
+is indistinguishable from progress.
+
+Neither change was wrong on its own. `home shims` was right to take ownership of
+the pin; the script was simply still exporting from the era when it owned the
+pin. They only met at the moment the pin started honouring the variable.
+
+So `close-change.sh` now exports **only** to a candidate that does not resolve
+itself through `$SKILL_MANAGER_CLI`, scrubs an inherited value for one that
+does, and applies the same rule to its capability *probes* — with the variable
+already set in an agent's environment, the hang landed inside `pick_cli`, before
+the script had printed which CLI it was even trying. See
+[the pin section](#the-pin-resolves-itself-through-skill_manager_cli-so-do-not-point-that-at-it)
+for the predicate and why it reads the candidate's bytes rather than its path.
+
+`selftest.sh` covers it under a hard time bound, because the regression's
+signature is silence: an unbounded check against it does not go red, it goes
+away. That section is also the only one that runs with `SKILL_MANAGER_CLI`
+**unset** — with it set, `pick_cli` returns it from the first branch and a home's
+own pin is never reached, which is how 26 green checks sat on top of this.
 
 and **refuses to remove the worktree** (exit 4) while that verdict is non-zero,
 printing every blocking unit and the exact command that clears it. Run the
@@ -481,7 +602,10 @@ Two measured consequences worth knowing before you rely on the in-repo copy:
   constituent**, not that constituent's current branch. On this repo the
   snapshot's `skill-manager` had no `home` command at all while the main tree's
   working copy did, so a worktree could not bootstrap from the repo's own CLI
-  until the snapshot was refreshed. Pin `SKILL_MANAGER_CLI` in the meantime.
+  until the snapshot was refreshed. Pin `SKILL_MANAGER_CLI` in the meantime — at
+  a real `skill-manager` **launcher**, never at a home's `bin/cli/skill-manager`
+  shim, which resolves itself through that same variable and would exec itself
+  forever.
 - **`new-change.sh` requires a clean parent tree**, and a parent mid-epic is
   often dirty with constituent drift. Then the worktree is created by hand and
   `bootstrap-home.sh --root <wt>` run against it — the same two steps the hook
@@ -497,4 +621,8 @@ Two measured consequences worth knowing before you rely on the in-repo copy:
 4. Copy `scripts/agent-home.sh` (the locator) into the repo root.
 5. Run `scripts/agent-home.sh` once for the main tree.
 6. From then on, `new-change.sh` gives every worktree its own home. Nothing to
-   remember and nothing to export.
+   remember and nothing to **export** — which is a statement about the
+   environment, not a promise that the first launch will proceed. Expect the
+   change-awareness gate (exit 8) on a new worktree and clear it with
+   `skill-manager home drift --show` then `--ack`; see
+   [the first launch is gated](#the-first-launch-is-gated-on-change-awareness-exit-8).

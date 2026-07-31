@@ -167,7 +167,89 @@ info "into:      ${INTO}"
 #
 # Search order puts the worktree's OWN bin/cli first: that slot names the build
 # the home was created with, which is the build that understands its layout.
-cli_has_close_out() { "$1" home close-out --help 2>&1 | command grep -q -- '--into'; }
+# That preference is right and is kept — but since #61 that slot holds a shim
+# that resolves ITSELF through $SKILL_MANAGER_CLI, so every invocation of a
+# chosen CLI goes through `run_cli` below, probes included. The probe is not
+# exempt: the variable can already be set in the caller's environment, and then
+# the hang happens here, before the `cli:` line is ever printed.
+cli_has_close_out() { run_cli "$1" home close-out --help 2>&1 | command grep -q -- '--into'; }
+
+# Would naming $1 in $SKILL_MANAGER_CLI make it exec ITSELF?
+#
+# Since skill-manager issue #61 the home's own pin — `<home>/bin/cli/skill-manager`,
+# which is the candidate the search below PREFERS, and which `skill-manager exec`
+# also puts first on an agent session's PATH — resolves its own target as
+#
+#   cli="${SKILL_MANAGER_CLI:-<absolute path of the build that pinned it>}"
+#   …
+#   exec "$cli" "$@"
+#
+# It already knows its absolute target; that is the whole point of a pin. Naming
+# the pin in that variable REPLACES the target with a path to itself, and it
+# re-execs forever. Measured on the epic #2 pilot: 7:03 of CPU over 13:06 of
+# wall clock, from one teardown. It hangs rather than failing, so on a fan-out
+# it is indistinguishable from slow work.
+#
+# Two predicates, because each covers the other's blind spot:
+#
+#   * the home's own pin SLOT, by path. That file's identity is "the CLI for
+#     this home", so pointing the variable at it is never what we mean — and
+#     this answer survives an unreadable file, a stripped comment header, or any
+#     future rewrite of the generated body.
+#   * any candidate whose bytes EXPAND the variable. That is the one that
+#     catches the PATH candidate: inside an agent session `command -v
+#     skill-manager` is some OTHER home's pin, whose path this script has no
+#     reason to recognise.
+#
+# Matched as FIXED strings, for the same reason bootstrap-home.sh matches
+# GENERATED_PIN_PREFIX that way: `${`, `:-` and `$` are each metacharacters in
+# some dialect of some grep, and a pattern that quietly matches nothing here
+# means the check never fires. Matched on an EXPANSION (`${NAME` / `$NAME`)
+# rather than on the bare name, so a shim that merely mentions the variable in a
+# diagnostic — as the generated pin's own error message does — is not caught by
+# that mention alone.
+#
+# This deliberately does not lean on skill-manager's companion self-exec guard.
+# The homes most likely to be torn down are the ones pinned by the build that
+# provisioned them, which is older than any guard added now.
+cli_resolves_through_the_pin_variable() {
+  local cli="$1" spelling
+  [ "$cli" = "$STORE/bin/cli/skill-manager" ] && return 0
+  for spelling in '${SKILL_MANAGER_CLI' '$SKILL_MANAGER_CLI'; do
+    if command grep -q -F -- "$spelling" "$cli" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
+
+# Invoke $1, with the environment that makes its remedies runnable and cannot
+# make it exec itself.
+#
+# The export is NOT dead weight for the candidates that are not self-pinning.
+# HomeCloseOut names the CLI in every remedy through HomeDescriptor.resolveCli,
+# whose rules are, in order: $SKILL_MANAGER_CLI, the running process's own
+# command (only when it looks like a launcher — a jbang/JVM process does not),
+# then <store>/bin/cli/skill-manager, then a bare `skill-manager` off PATH. When
+# `pick_cli` answered with a checkout's or the integration parent's launcher,
+# dropping the export lets resolution fall through to that last rule, and a bare
+# `skill-manager` on this machine is the released 0.19.2, which exits 2 for the
+# operator who copy-pastes the remedy. That is the defect selftest.sh's
+# `the_printed_remedy_names_an_executable_that_exists` exists to hold shut, so
+# the export is kept exactly where it is still doing that job.
+#
+# When the CLI IS self-pinning the export buys nothing anyway: rule 3 already
+# answers <store>/bin/cli/skill-manager, which is the same runnable absolute
+# path. So an INHERITED value is scrubbed rather than merely not set — the
+# livelock does not care who exported it, and `skill-manager exec` puts a pin
+# first on PATH, which is precisely how one gets picked with the variable
+# already set in the agent's environment.
+run_cli() {
+  local cli="$1"; shift
+  if cli_resolves_through_the_pin_variable "$cli"; then
+    env -u SKILL_MANAGER_CLI "$cli" "$@"
+  else
+    SKILL_MANAGER_CLI="$cli" "$cli" "$@"
+  fi
+}
 
 pick_cli() {
   local pinned="${SKILL_MANAGER_CLI:-}" c integration
@@ -187,6 +269,13 @@ pick_cli() {
   if [ -n "$c" ] && cli_has_close_out "$c"; then printf '%s\n' "$c"; return 0; fi
   return 1
 }
+
+# Announced, because this loop is silent and not fast: every candidate it
+# considers costs a CLI start, and there are up to five of them. Until this line
+# existed the last thing printed before the search was `into:`, so a search that
+# never returned looked exactly like a search that was still going — which is how
+# the self-exec livelock below was mistaken for slow work.
+info "probing:   for a skill-manager that answers \`home close-out\` (one CLI start per candidate)"
 
 # `|| true` because pick_cli returning 1 under `set -e` would abort before the
 # refusal below can explain itself.
@@ -229,22 +318,27 @@ elif [ ! -d "$INTO" ]; then
 else
   info "cli:       $CLI"
   step "Gate: does this worktree still hold work?"
-  # SKILL_MANAGER_CLI is exported into the child on purpose, and it is the whole
-  # of this script's contribution to the remedy strings. HomeCloseOut names the
-  # CLI in every remedy through HomeDescriptor.resolveCli, whose first rule is
-  # this variable; pick_cli above has ALREADY established which build
-  # understands this home (by reading `home close-out --help` for `--into`,
-  # because the released 0.19.2 answers unknown subcommands with top-level usage
-  # and exit 0), so passing that answer in is how the gate prints a command the
-  # operator can actually run.
+  # Say what is about to run, and say it BEFORE running it. This is the script's
+  # longest step by an order of magnitude — a CLI start plus a full compare of
+  # two homes — and when it went wrong it went wrong by not returning. A step
+  # banner alone ("Gate: …") cannot be told apart from a hang; the command can,
+  # because the operator can run it by hand and watch it do the same thing.
+  info "running:   $CLI home close-out --home $STORE --into $INTO --json"
+  # The remedy strings the gate prints have to name a CLI the operator can run,
+  # and it is HomeCloseOut that names it, through HomeDescriptor.resolveCli.
+  # `run_cli` supplies the environment that makes that resolution land on a
+  # runnable path — passing this script's already-probed answer in through
+  # $SKILL_MANAGER_CLI when doing so is safe, and staying out of the way when
+  # the chosen CLI is a self-pinning shim that would otherwise exec itself
+  # forever. See cli_resolves_through_the_pin_variable.
   #
-  # This replaced a regex substitution over the rendered remedy, which was the
-  # wrong shape twice over: it fixed only the --json consumer and left
-  # `home close-out`'s own human output printing the un-runnable spelling, and
-  # its token boundary matched inside `skill-manager.toml` — the most common
-  # conflicted file there is — rewriting the operator's conflict list into a
-  # path in a different repository.
-  VERDICT="$(SKILL_MANAGER_CLI="$CLI" "$CLI" home close-out \
+  # Naming the CLI at all replaced a regex substitution over the rendered
+  # remedy, which was the wrong shape twice over: it fixed only the --json
+  # consumer and left `home close-out`'s own human output printing the
+  # un-runnable spelling, and its token boundary matched inside
+  # `skill-manager.toml` — the most common conflicted file there is — rewriting
+  # the operator's conflict list into a path in a different repository.
+  VERDICT="$(run_cli "$CLI" home close-out \
       --home "$STORE" --into "$INTO" --json 2>/dev/null)" && rc=0 || rc=$?
 
   if [ -z "$VERDICT" ]; then
