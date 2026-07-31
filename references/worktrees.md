@@ -83,7 +83,7 @@ $WT/.skill-manager/bin/launch/claude
 #    working home, not a broken one. Read and clear it, then launch again —
 #    through the home's OWN cli entrypoint, since a bare `skill-manager` may be
 #    an older release:
-$WT/.skill-manager/bin/cli/skill-manager home drift --show
+$WT/.skill-manager/bin/cli/skill-manager home drift
 $WT/.skill-manager/bin/cli/skill-manager home drift --ack
 
 # 2. Make the change across constituents in the worktree. Use the composed

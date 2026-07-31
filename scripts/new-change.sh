@@ -205,7 +205,7 @@ Launch an agent bound to this worktree's own home:
 If that first launch is REFUSED with exit 8, the home is fine — its units
 changed and skill-manager gates the next launch until the change has been read.
 Read it and clear it, through this home's own CLI entrypoint:
-  $WT/.skill-manager/bin/cli/skill-manager home drift --show
+  $WT/.skill-manager/bin/cli/skill-manager home drift
   $WT/.skill-manager/bin/cli/skill-manager home drift --ack
 Then commit and bring it back:
   git -C "$WT" add -A && git -C "$WT" commit -m "$TICKET: <what changed>"

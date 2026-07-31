@@ -135,8 +135,8 @@ $S/new-change.sh TICKET-123                        # worktree on feature/TICKET-
 #      ../<repo>-TICKET-123/.skill-manager/bin/launch/claude
 #      That first launch may be REFUSED with exit 8 — skill-manager gates a
 #      launch from a home whose units changed until the change has been read.
-#      Clear it with `<that home>/bin/cli/skill-manager home drift --show`
-#      then `--ack`. See references/skill-homes.md.
+#      Read it with `<that home>/bin/cli/skill-manager home drift`, then clear
+#      it with the same command plus `--ack`. See references/skill-homes.md.
 #   ...edit in the worktree, commit to the feature branch...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
 
