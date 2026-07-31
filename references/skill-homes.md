@@ -44,92 +44,78 @@ thin wrappers over it. **Launch agents through the shims** (or through
 `skill-manager exec`) and you inherit the whole contract; export variables by
 hand and you get the part you remembered.
 
-But note what that is: **convention**. Env vars and PATH order. Nothing in it
-*stops* a process writing to `~/.skill-manager`, to another project's home, or
-to `~/.ssh`. Every leak this epic fixed was a process writing where nothing
-stopped it, and every fix was a convention that regresses the moment someone
-forgets a variable. That is what the next section is for.
+### It is a convention, and it is enforced by tests rather than by the kernel
 
-## The kernel boundary — opt-in, per home
+Say what that is plainly: **env vars and PATH order**. Nothing in it *stops* a
+process writing to `~/.skill-manager`, to another project's home, or to
+`~/.ssh`. A determined — or merely surprising — process can write anywhere the
+operator can. Every leak this epic fixed was a process writing where nothing
+stopped it.
 
-```bash
-skill-manager home shims --sandbox --home <worktree>/.skill-manager
-```
+What keeps the convention from regressing is not a boundary, it is that the
+recipe is written down **once** and something fails when a second copy appears:
 
-writes `<home>/launch.sb` and declares `SKILL_MANAGER_SANDBOX=1` in the
-descriptor. From then on every launch through that home — every shim, every
-grandchild — runs under `/usr/bin/sandbox-exec`, which enforces at the kernel:
+- `test_graph/sources/lib/SmEnv.java` in `skill-manager` is the only place that
+  puts `SKILL_MANAGER_HOME`, `SKILL_MANAGER_INSTALL_DIR`, `CLAUDE_HOME`,
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GEMINI_HOME` into a child environment.
+  `sources/sandbox/SandboxEnvContract.java` is the oracle that keeps it the only
+  one: it fails if any other file writes one of those, and it fails if a file
+  that spawns the CLI does not reach `SmEnv` through its own `//SOURCES`
+  closure. It plants five synthetic nodes every run and requires the detector to
+  flag three and clear two, because a scan reporting "no violations" is worth
+  nothing until it has been shown to report one. Before that existed the recipe
+  lived in prose and four disagreeing copies, and **50 of 105** CLI env sites
+  passed neither the agent variables nor `HOME` — one of those projections
+  turned up in a live agent's available-skills list. It is 0 now.
+- `LaunchEnv.requireClaudeRedirected()`, called by `ExecCommand` **before any
+  child process is created**, refuses a launch whose Claude config directory
+  resolves outside the home root. Skills load from that directory, so an
+  unredirected one is not a warning, it is the wrong home.
 
-| | |
-|---|---|
-| **Writable** | the **worktree** (`<home>/..`, which contains `.skill-manager`, `.claude`, `.codex`, `.gemini`), the store, and `$TMPDIR` / `/tmp` / `/var/tmp` |
-| **Readable** | everything |
-| **Denied** | every other write, including all four operator homes |
+A `sandbox-exec` (Seatbelt) layer was built to make this a real kernel boundary,
+and it was **removed** (`skill-manager` #60, closed as not-planned; commit
+`5f8d61e`). Three reasons, none of them a defect in the code: it is macOS-only,
+so the guarantee existed on one platform and every other got the convention
+anyway; it fought the harnesses it was protecting, because `claude` and `codex`
+each spawn their own tooling and each met the profile somewhere different, so
+the failure mode was a mid-session `EPERM` from a process skill-manager did not
+write and could not explain; and its cache redirection gave every home a private
+copy of stores the operator already had (`~/.cache/uv` alone is 51 GB here, and
+this machine carries 35 homes). If you are looking for `SKILL_MANAGER_SANDBOX`,
+`launch.sb` or `home shims --sandbox`: they do not exist. Nothing in this repo
+offers a kernel boundary, and an earlier version of this page said otherwise.
 
-The writable root is the *worktree*, not the home, because an agent handed a
-ticket has to edit the source tree the ticket is about.
+### What a per-home clone actually costs
 
-Undo it with `--no-sandbox`. A home that never opted in behaves exactly as it
-does today.
+The three-tier model — a home per repository, a home per ticket worktree — is
+affordable because a clone is **copy-on-write**, not a copy. `Files.copy` with
+`COPY_ATTRIBUTES` takes the JDK's `clonefile(2)` path on APFS and the
+destination shares the source's blocks. Measured on this host by free-space
+delta on a dedicated volume: a `home clone` of a 189 MB home consumes **7.22 MB
+— 3.8%**. Do not check this with `du`; it attributes shared blocks to both files
+and reported 197.1 MB against 7.14 MB real.
 
-### What this is NOT
+`cache/`, `tmp/`, `logs/`, `venvs/`, `tools/` and `npm/` are skipped on top of
+that (see the clone caveat further down).
 
-**A filesystem boundary against accidents. Not containment against an
-adversary.** Three ways out, all measured, all reachable by ordinary code with
-no adversarial intent:
+### Package caches are shared; install targets are not
 
-1. **An inherited write file descriptor.** `sandbox(7)` enforces at
-   *acquisition*. A parent that opens `~/.claude/x` and then spawns the
-   sandboxed child has handed it a working handle; the sandbox never sees a
-   path. Not fixable.
-2. **A pre-existing daemon is a confused deputy.** A sandboxed Gradle build
-   talks to an already-running *unsandboxed* daemon and the daemon does the
-   writing. There was one on this machine writing into
-   `~/.skill-manager/skills/test-graph/.../.gradle/` from another session while
-   this was being built. Any client of any out-of-sandbox service has this
-   shape.
-3. **A hardlink made outside the sandbox** leaves a protected inode reachable
-   through an allowed path. The kernel checks the path that is opened, and that
-   path is allowed.
+A home does **not** get a private package cache, and the distinction is not
+read-only versus writable — nothing here is read-only, and an agent can still
+`uv pip install` (`skill-manager` commit `8fddd6e`, `pm/PackageCaches.java`):
 
-Also: `/tmp`, `/var/tmp` and `$TMPDIR` are fully writable — `/bin/bash` 3.2
-writes here-document bodies to `/tmp` and ignores `TMPDIR`, so without that
-every `bash -c 'cat <<EOF'` in an agent session fails. Nothing this profile
-protects lives there; do not put anything you are protecting there either.
+| | category | |
+|---|---|---|
+| `~/.cache/uv`, `~/.npm`, the pip wheel cache | content-addressed | **shared** — an entry is named by the hash of what it holds, so two homes racing to populate one key write the same bytes |
+| `<home>/venvs`, `<home>/bin/cli`, `<home>/npm/<skill>`, `<home>/pm/<tool>`, `<home>/cache` | install target | **per-home** — mutable, and two homes pointed at one are a `--force` away from pulling the interpreter out from under each other |
 
-### Things that will bite you
-
-- **A profile edit is a launch failure, not a silent widening.** SBPL is
-  *last-match-wins*: one appended `(allow file-write* (subpath "/"))` reopens
-  everything while the file still reads as deny-by-default. `exec` re-parses
-  `launch.sb` on every launch and refuses (exit **11**) if any rule grants a
-  write to something that is neither a `(param "…")` nor a `/dev/` device.
-- **Asking for it and not getting it is also exit 11.** Missing
-  `sandbox-exec`, missing `launch.sb`, or a bad parameter stops the launch
-  rather than proceeding unconfined. Proceeding would leave you believing in a
-  boundary you do not have.
-- **The global home cannot be sandboxed**, by construction: its store is
-  `~/.skill-manager`, so its home root is `~`, so the writable root would be
-  `$HOME` — every home it exists to protect. That is refused explicitly.
-- **A denial reaches a shell as exit 0.** `sh -c 'echo x > denied'` under
-  `sandbox-exec` prints `Operation not permitted` and exits 0. Check the
-  *file*, never the status.
-- **Build caches are redirected, not allowed out.** A sandboxed launch gets
-  `GRADLE_USER_HOME`, `UV_CACHE_DIR`, `npm_config_cache`, `XDG_CACHE_HOME` and
-  `JBANG_DIR` under `<worktree>/.cache/`. The first sandboxed build in a fresh
-  home therefore re-downloads. `~/.m2` is *not* redirected — Maven has no cache
-  env var; pass `-Dmaven.repo.local` if you need it.
-- **`sandbox-exec(1)` has said DEPRECATED since 2017** and has no sanctioned
-  successor (App Sandbox needs a signed, entitled bundle). It is still shipped
-  and rebuilt with the OS. The opt-in design is the mitigation: if it goes away
-  you lose enforcement and keep today's behaviour.
-
-The mechanism is `dev.skillmanager.launch.SeatbeltSandbox` /
-`SeatbeltProfile`; the profile is `openai/codex`'s
-`seatbelt_base_policy.sbpl` (Apache-2.0, crediting Chromium's `common.sb`,
-BSD-3) vendored verbatim plus a skill-manager section. The oracle is the
-`home-clone` graph node `home.clone.seatbelt.confines.the.worktree`, which
-asserts on bytes with an unsandboxed control.
+Sharing the store only pays if materializing out of it is cheap, so `UV_LINK_MODE`
+is chosen per filesystem: `clone` (reflink) when the store and the home can
+share blocks, `hardlink` on a same-filesystem pair that cannot reflink, `copy`
+across filesystems. Guessing wrong degrades rather than breaks — uv falls back
+to copy and warns. Measured counter-example for why this matters: three
+skill-script venvs in one home held 48,258 files across 48,258 distinct inodes,
+1.6 GB with zero sharing.
 
 ## When to bootstrap
 
@@ -212,37 +198,65 @@ half-bootstrapped worktree is worse than none.
 ### The pin at `<home>/bin/cli/skill-manager`
 
 That slot decides which build every launch from the home runs. The generated
-launchers and `HomeDescriptor.resolveCli` both consult it before `PATH`, so
-`bootstrap-home.sh` writes an **absolute pin** there naming the build it
-resolved, and re-writes it on every run — including on an already-bootstrapped
-home, without `--force`, because the operator has no way to know the slot is
-wrong. A **frozen** home is never written, here as everywhere else.
+launchers read it and `HomeDescriptor.resolveCli` documents it as rule 3, and
+since `skill-manager` issue #61 there is **no `PATH` fallback behind it** — the
+launcher's last line is `exec "$cli" exec --home …` and the released 0.19.2 on
+`PATH` has no `exec` subcommand, so a `PATH` branch could only ever produce
+`Unmatched arguments: 'exec'`. A wrong or missing pin is therefore not a
+downgrade, it is a home that cannot launch.
 
-Two ways the slot goes wrong, both measured on this repo:
+**`skill-manager home shims` writes it. `bootstrap-home.sh` does not.**
 
-- **Empty.** Every shim falls through to `PATH`, which here is the released
-  0.19.2 — no `exec`, no `home`, no `home close-out`. The shim's
-  `skill-manager exec …` printed "Unmatched arguments" and **exited 0**, so the
-  launch silently did nothing.
-- **Occupied by `home shims`' own generated shim.** That shim resolves via
-  `PATH` by design (it is written to survive the home being copied elsewhere).
-  Newer builds write it during the bootstrap, so a guard of "write the pin only
-  if the slot is empty" saw an occupied slot and skipped — and the home pointed
-  at the released CLI anyway. That is exactly the split observed here: the root
-  home, bootstrapped before `home shims` filled the slot, carries the pin;
-  every constituent home bootstrapped afterwards carried the generated shim.
+It used to, and that was right at the time: `home shims` wrote a
+`PATH`-resolving shim, so homes bootstrapped through this script worked and
+homes provisioned by `home shims` alone died at their last line — and because
+this script masked the difference across a 24-repo onboarding fan-out, nobody
+saw it. Commit `e65962e` fixed `home shims` to write the absolute pin itself,
+derived from the build running it (`RunningCli`), and at that moment two writers
+of one file stopped being a redundancy and became a race with one correct
+answer.
 
-So the pin is written when the slot is empty **and** in place of the generated
-shim, which is not a tool anyone installed. Anything else in that slot is left
-alone — it could be a real CLI dep. The pin deliberately has **no `PATH`
-fallback**: falling through to an older CLI is the behaviour it exists to
-remove, and that CLI answers unknown subcommands with top-level usage and exit
-0, a downgrade that looks like success. If the pinned build disappears the shim
-exits 127 and says how to re-pin.
+This script's predicate lost that race. It decided whether to overwrite by
+grepping the slot for the literal words `home shims` — which the **fixed**
+generated file also contains. Measured: **17 of 25** homes had a correct pin
+replaced by a pin to whatever `pick_cli` had chosen, and an 18th, written before
+the script marked its own output, was not repaired at all. A predicate that keys
+on prose cannot distinguish versions of the prose, which is why the fix
+introduced a stable token — `skill-manager:cli-pin`, `LauncherShims.PIN_MARKER`,
+on line 2 of the generated body.
+
+So `ensure_cli_pin` **verifies, and delegates every repair to the one writer**:
+
+| What is in the slot | What happens |
+|---|---|
+| The `skill-manager:cli-pin` marker | Read the pinned path, check it is executable, **stop**. The file is not this script's to rewrite. |
+| Nothing | Re-run `home shims` |
+| This script's own older pin (`git-integration-repo:cli-pin`, or the unmarked one before it) | Re-run `home shims` |
+| A pre-#61 `PATH`-resolving shim (identified by its `command -v skill-manager`, since it carries no marker) | Re-run `home shims` |
+| Anything else | Left alone — it could be a real CLI dep |
+
+A pin whose target is **gone** is a refusal, not a repair: the script names the
+missing path and the command that re-pins it (`home shims --home <store>`, run
+from the build the home should use) and writes nothing. Substituting a CLI of
+its own choosing is exactly what overwrote the 17.
+
+This runs on an already-bootstrapped home without `--force`, because the
+operator has no way to know the slot is wrong. A **frozen** home is never
+written, here as everywhere else.
+
+`home shims` itself **refuses rather than guessing**: `RunningCli` probes
+`SKILL_MANAGER_CLI`, the running process's own command,
+`SKILL_MANAGER_INSTALL_DIR` and the jar's location, and exits 127 having written
+nothing when none answers. Every candidate `pick_cli` can return is a launcher
+that exports `SKILL_MANAGER_INSTALL_DIR` before it execs the JVM, so the probe
+succeeds — but `bootstrap-home.sh` prints that refusal verbatim rather than
+reducing it to an exit code, because a `$CLI` that is not a launcher (a bare
+`jbang SkillManager.java`) is a configuration mistake that deserves the CLI's
+own diagnostic.
 
 Pinning the slot does **not** retire `close-change.sh`'s help-**text** probe.
-`pick_cli` still falls through to `PATH` when the home's own slot cannot be
-used, and `PATH` is still 0.19.2, so the exit-status trap is still reachable.
+`pick_cli` still consults `PATH` when nothing else answers, and `PATH` here is
+still 0.19.2, so the exit-status trap is still reachable.
 
 ## The one ordering rule
 
