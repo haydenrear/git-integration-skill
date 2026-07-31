@@ -114,8 +114,11 @@ $S/verify.sh                                      # assert parent clean + every 
 # --- agent homes ---
 $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-manager home (idempotent)
 #   --root defaults to the nearest git toplevel — inside a constituent that is
-#   the CONSTITUENT, not the integration parent. Re-running also re-pins
-#   <home>/bin/cli/skill-manager to the build it resolved.
+#   the CONSTITUENT, not the integration parent. Re-running CHECKS
+#   <home>/bin/cli/skill-manager (written by `skill-manager home shims`, which
+#   pins the build that ran it) and re-runs `home shims` when the slot is
+#   absent, stale or a pre-#61 PATH-resolving shim. It never writes that file
+#   itself, and it refuses rather than re-pointing a pin whose build is gone.
 #   A WORKTREE clones from its project home (<main working tree>/.skill-manager),
 #   never from $SKILL_MANAGER_HOME, because that is the home close-change.sh
 #   reconciles it back into. No project home yet -> it refuses.
