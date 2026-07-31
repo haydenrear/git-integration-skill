@@ -79,6 +79,42 @@ ok()   { PASSED=$((PASSED + 1)); printf '  PASS  %s\n' "$1" >&2; }
 bad()  { FAILED=$((FAILED + 1)); printf '  FAIL  %s\n      %s\n' "$1" "$2" >&2; }
 check() { if [ "$1" = 1 ]; then ok "$2"; else bad "$2" "$3"; fi; }
 
+# run_bounded <seconds> <command...> — run it, or kill it and return 124.
+#
+# For the one failure mode that does not fail: a shim that `exec`s itself
+# resolves nothing, prints nothing, and never returns, so an unbounded check
+# against it does not go red, it goes AWAY — and takes the rest of the suite
+# with it. 124 is timeout(1)'s spelling and is used here so the exit code reads
+# the same as the tool everyone knows.
+#
+# Rolled by hand rather than shelling out to `timeout`: macOS ships neither
+# `timeout` nor `gtimeout` by default, and a check that skipped itself on the
+# platform this defect was found on would report the same green as a passing
+# one.
+#
+# The job gets its OWN PROCESS GROUP (`set -m`) and the GROUP is killed. The
+# runaway is a grandchild — close-change.sh's command substitution execs the
+# shim — so killing only the job leaves it spinning, which is exactly the
+# orphan the pilot left behind: 7:03 of CPU over 13:06 of wall clock.
+run_bounded() {
+  local limit="$1"; shift
+  local pid waited=0 rc=0
+  set -m
+  "$@" & pid=$!
+  set +m
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge $((limit * 10)) ]; then
+      kill -9 -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
 # ------------------------------------------------------------------ fixture
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/gir-selftest-XXXXXX")"
@@ -370,6 +406,148 @@ check "$(yesno absent_pattern 'feature/T9' "$SCRATCH/branches.txt")" \
 check "$(yesno contains "bootstrap-home.sh --root \"$NOHOME\"" "$(cat "$SCRATCH/newchange.log")")" \
   "the_failure_names_a_remedy_that_actually_works" \
   "the trailing remedy does not name the PROJECT root; see $SCRATCH/newchange.log"
+
+# ------------------------- 6. the gate does not make its own CLI exec itself
+
+step "The gate runs the home's own CLI pin without wedging it"
+
+# The pin at <home>/bin/cli/skill-manager is the candidate close-change.sh
+# PREFERS, and since skill-manager issue #61 it resolves its own target as
+# `cli="${SKILL_MANAGER_CLI:-<absolute>}"` and ends in `exec "$cli" "$@"`.
+# close-change.sh used to invoke the gate as `SKILL_MANAGER_CLI="$CLI" "$CLI" …`
+# — correct when the script owned the pin, and after #61 an instruction to the
+# pin to exec ITSELF. Measured on the epic #2 pilot: 7:03 of CPU over 13:06 of
+# wall clock, from one teardown, with no output and no exit.
+#
+# Everything here is a shell stub. The point is not to test skill-manager; it is
+# that the ONE property under test — what environment close-change.sh hands the
+# CLI it picked — must be observable without a JVM, must not take a minute, and
+# must not go quiet if it regresses.
+#
+# The fixture is what the other sections cannot be: SKILL_MANAGER_CLI is UNSET.
+# `bare` pins it to a real launcher, so `pick_cli` takes its first branch there
+# and never reaches the home's own pin at all — which is why 26 green checks sat
+# on top of this defect. Unsetting it is the whole fixture.
+
+step_scratch="$SCRATCH/pinned"
+STUB_DIR="$SCRATCH/stub"
+STUB="$STUB_DIR/skill-manager"
+STUB_LOG="$SCRATCH/stub-invocations.log"
+# What the PIN itself was handed, which is the fact under test. The stub cannot
+# answer it: when the pin is wedged the stub is never reached at all, so a check
+# reading only the stub's record would pass on a livelock by seeing nothing.
+PIN_LOG="$SCRATCH/pin-last-invocation.log"
+mkdir -p "$STUB_DIR"
+
+# Answers the capability probe with text carrying `--into` (a status-only probe
+# would accept anything), answers the gate with a clean verdict, and records
+# every invocation together with the value of SKILL_MANAGER_CLI it was handed —
+# which is the variable the whole check is about.
+cat > "$STUB" <<EOF
+#!/usr/bin/env bash
+printf 'argv=[%s] SKILL_MANAGER_CLI=[%s]\n' "\$*" "\${SKILL_MANAGER_CLI:-<unset>}" >> "$STUB_LOG"
+case "\$*" in
+  *"home close-out --help"*)
+    printf 'Usage: skill-manager home close-out [--home <dir>] [--into <dir>] [--json]\n'
+    printf '  --into <dir>   the project home to reconcile into\n'
+    exit 0 ;;
+esac
+printf '{"units":[],"blockers":[]}\n'
+EOF
+chmod +x "$STUB"
+
+mkdir -p "$step_scratch"
+git -C "$step_scratch" init -q -b main
+git -C "$step_scratch" config user.email selftest@example.invalid
+git -C "$step_scratch" config user.name "selftest"
+printf 'fixture\n' > "$step_scratch/README.md"
+git -C "$step_scratch" add -A
+git -C "$step_scratch" -c commit.gpgsign=false commit -qm "fixture"
+seed_home "$step_scratch/.skill-manager" "pinned-project-unit"
+
+PIN_WT="$SCRATCH/pinned-T6"
+git -C "$step_scratch" worktree add -q -b feature/T6 "$PIN_WT" main
+PIN_HOME="$PIN_WT/.skill-manager"
+seed_home "$PIN_HOME" "pinned-worktree-unit"
+
+# The generated pin, reproduced in the shape `home shims` writes it: the stable
+# marker, the home binding, the `${SKILL_MANAGER_CLI:-<absolute>}` resolution and
+# the closing `exec`. Written here rather than obtained from a real `home shims`
+# run so the check keeps its meaning against a home pinned by an OLDER build —
+# which is most of them, and which no guard added to the CLI now can reach.
+mkdir -p "$PIN_HOME/bin/cli"
+PIN="$PIN_HOME/bin/cli/skill-manager"
+cat > "$PIN" <<EOF
+#!/usr/bin/env bash
+# skill-manager:cli-pin — generated by \`skill-manager home shims\`, do not edit.
+set -euo pipefail
+self_dir="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd -P)"
+home="\$(cd -- "\$self_dir/../.." && pwd -P)"
+export SKILL_MANAGER_HOME="\$home"
+# TRUNCATING, not appending: a wedged pin re-execs thousands of times in the
+# bound below, and the record has to stay a fixed size. The LAST invocation is
+# the interesting one either way — it is the gate call.
+printf 'SKILL_MANAGER_CLI=[%s] argv=[%s]\n' "\${SKILL_MANAGER_CLI:-<unset>}" "\$*" > "$PIN_LOG"
+cli="\${SKILL_MANAGER_CLI:-$STUB}"
+if [ ! -x "\$cli" ]; then
+  echo "skill-manager: the CLI pinned for the home at \$home is missing:" >&2
+  echo "  Re-pin it with \`skill-manager home shims\`, or set SKILL_MANAGER_CLI." >&2
+  exit 127
+fi
+exec "\$cli" "\$@"
+EOF
+chmod +x "$PIN"
+
+# `bare` with SKILL_MANAGER_CLI removed as well, run from the project root. The
+# removal is the fixture: with the variable set, `pick_cli` returns it from its
+# first branch and the home's own pin is never invoked.
+close_the_pinned_worktree() {
+  cd "$step_scratch" || return 1
+  env -u SKILL_MANAGER_HOME -u SKILL_MANAGER_CLI \
+      HOME="$FAKE_HOME" \
+      JAVA_TOOL_OPTIONS="-Duser.home=$FAKE_HOME" \
+      bash "$SCRIPT_DIR/close-change.sh" "$PIN_WT" --dry-run
+}
+
+PIN_RC=0
+run_bounded 25 close_the_pinned_worktree > "$SCRATCH/pinned.log" 2>&1 || PIN_RC=$?
+
+check "$(yesno test "$PIN_RC" != 124)" \
+  "the_gate_returns_when_the_cli_it_picked_is_the_homes_own_pin" \
+  "close-change.sh did not return within 25s (rc=$PIN_RC). The home's pin resolves
+      its target as \${SKILL_MANAGER_CLI:-<absolute>} and ends in exec \"\$cli\", so
+      naming the pin in that variable makes it exec itself forever; see $SCRATCH/pinned.log"
+
+# Non-vacuity, twice over. A run that refused early — no CLI found, no home, no
+# project home — would also "return within 25s", and would prove nothing.
+CLI_LINE="$(command grep -m1 '^  cli:' "$SCRATCH/pinned.log" || true)"
+check "$(yesno ends_with "$PIN" "$CLI_LINE")" \
+  "the_cli_under_test_really_is_the_homes_own_pin" \
+  "expected 'cli: $PIN', got '${CLI_LINE:-<no cli: line — pick_cli chose nothing>}'"
+check "$(yesno command grep -q 'gate:      clean' "$SCRATCH/pinned.log")" \
+  "the_gate_reached_a_verdict_through_the_pin" \
+  "no clean verdict — the gate did not complete through the pin; see $SCRATCH/pinned.log"
+
+# And the cause, named directly rather than inferred from the clock: whatever
+# else close-change.sh hands the pin, it must not hand it the pin. Read from the
+# PIN's own record, so it is still an assertion about the gate invocation when
+# the pin never returns — and so it stays meaningful if the shim later grows a
+# self-exec guard of its own and the livelock becomes a fast error rather than
+# a hang.
+PIN_SAW="$(cat "$PIN_LOG" 2>/dev/null || true)"
+check "$(yesno contains 'SKILL_MANAGER_CLI=[<unset>]' "$PIN_SAW")" \
+  "the_pin_is_invoked_with_no_SKILL_MANAGER_CLI_to_resolve_itself_through" \
+  "the pin's last invocation was '${PIN_SAW:-<the pin was never invoked>}'"
+check "$(yesno absent_substring "SKILL_MANAGER_CLI=[$PIN]" "$PIN_SAW")" \
+  "the_pin_is_never_named_in_the_variable_it_resolves_itself_through" \
+  "close-change.sh handed the pin its own path: '$PIN_SAW'"
+# The stub is the other end of the same invocation, and it is what proves the
+# pin resolved THROUGH to a real CLI rather than answering out of its own error
+# path.
+check "$(yesno command grep -q 'argv=\[home close-out --home' "$STUB_LOG")" \
+  "the_pinned_build_behind_the_shim_is_what_answered_the_gate" \
+  "the CLI behind the pin never saw the gate call; it recorded:
+      $(command sed 's/^/        /' "$STUB_LOG" 2>/dev/null || printf '        <nothing>')"
 
 # ------------------------------------------------------------------- verdict
 
