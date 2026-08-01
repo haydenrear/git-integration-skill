@@ -163,6 +163,18 @@ git -C "$PROJ" add -A
 git -C "$PROJ" -c commit.gpgsign=false commit -qm "fixture"
 seed_home "$PROJ_HOME" "project-only-unit"
 
+# A CLI shim whose target lives under a directory `home clone` deliberately
+# SKIPS (venvs/, tools/, npm/, cache/). Every real home on this machine has one
+# — `bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2` is the measured case —
+# and the copy therefore arrives with a link that does not resolve. That is what
+# `skill-manager home verify` refuses a home for, and bootstrap-home.sh used to
+# print `verified` beside it without a word. Seeded here so the fixture has the
+# property the real homes have.
+mkdir -p "$PROJ_HOME/bin/cli" "$PROJ_HOME/venvs/jinja2-cli/bin"
+printf '#!/bin/sh\nexit 0\n' > "$PROJ_HOME/venvs/jinja2-cli/bin/jinja2"
+chmod +x "$PROJ_HOME/venvs/jinja2-cli/bin/jinja2"
+ln -s ../../venvs/jinja2-cli/bin/jinja2 "$PROJ_HOME/bin/cli/jinja2"
+
 # Every child runs the way an operator does: no SKILL_MANAGER_HOME, HOME
 # pointing at the decoy so the "global home" fallback is the decoy, and
 # user.home overridden because the JVM on macOS derives it from the OS and
@@ -220,6 +232,115 @@ check "$(yesno command grep -q 'not re-cloning' "$SCRATCH/bootstrap-force.log")"
 check "$(yesno exists "$WT_HOME/skills/project-only-unit")" \
   "a_force_rerun_leaves_the_existing_home_intact" \
   "$WT_HOME/skills/project-only-unit vanished across --force (rc=$FORCE_RC)"
+
+# --------------------------------- 1b. what the banner claims about the home
+#
+# git-integration-skill#10 and the two findings beside it. Everything above is
+# about WHERE the home came from; these are about what the run then SAYS about
+# it, which is the half that fails open.
+
+step "The banner describes the home it actually produced (#10)"
+
+# The count is stated, and it is the count. A `verified:` line that names no
+# number is how "verified" came to be printed over a home with nothing in it.
+VERIFIED_LINE="$(command grep -m1 '^  verified:' "$SCRATCH/bootstrap.log" || true)"
+check "$(yesno contains "1 skill(s) servable" "$VERIFIED_LINE")" \
+  "the_verified_line_states_how_many_skills_the_home_can_serve" \
+  "expected the servable-skill count in '${VERIFIED_LINE:-<no verified: line>}'"
+
+# The dangling shim the fixture seeded. `skill-manager home verify` refuses this
+# home for it; bootstrap must at minimum SAY so, or the two disagree and the
+# operator believes the one that ran.
+check "$(yesno command grep -q 'bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2' "$SCRATCH/bootstrap.log")" \
+  "a_link_that_does_not_resolve_in_the_new_home_is_named" \
+  "the clone skipped venvs/ and the resulting dangling shim was never mentioned; see $SCRATCH/bootstrap.log"
+
+# The remedy the caveat prints is a command an operator copy-pastes, and run as
+# it used to be spelled — SKILL_MANAGER_HOME alone — its binding step writes the
+# OPERATOR'S ~/.claude.json. Measured: `ADDED claude (~/.claude.json)`. That is
+# skill-manager#145 reached through a string printed here, so the agent-home
+# variables are asserted on the same line as the command.
+#
+# Scoped to the caveat THIS SCRIPT writes — the tail of the log from `The home
+# is a clone` onward — because `home clone` prints the unsafe spelling itself,
+# higher up, and that string belongs to skill-manager. Measured while writing
+# this check: the CLI's own line reads
+#   re-provision with `SKILL_MANAGER_HOME=<home> skill-manager sync --force-scripts`
+# which is the hijack verbatim. This repo cannot fix that line, so the caveat now
+# contradicts it in words and the assertion is made where the fix lives.
+CAVEAT="$(command sed -n '/The home is a clone/,$p' "$SCRATCH/bootstrap.log" || true)"
+SYNC_LINE="$(printf '%s\n' "$CAVEAT" | command grep -m1 'sync --force-scripts' || true)"
+check "$(yesno test -n "$SYNC_LINE")" \
+  "the_clone_caveat_still_prints_a_sync_command_to_check" \
+  "no 'sync --force-scripts' line in the caveat at all, so the next check would prove nothing"
+check "$(yesno contains "CLAUDE_CONFIG_DIR=$WT" "$SYNC_LINE")" \
+  "a_printed_sync_command_pins_the_agent_home_env_too" \
+  "'$SYNC_LINE' names the home but not CLAUDE_CONFIG_DIR — run from a bare shell it
+      writes the operator's ~/.claude.json (skill-manager#145)"
+check "$(yesno contains "not the one" "$CAVEAT")" \
+  "the_caveat_warns_off_the_unsafe_spelling_the_cli_printed_above_it" \
+  "the CLI's own SKILL_MANAGER_HOME-only remedy is left standing as the last word"
+
+# And it must not claim a repair it cannot make. Measured: `home verify` rc=1 ->
+# run this exact remedy -> `home verify` rc=1, same message, <home>/venvs still
+# empty. Nothing in `sync` recreates a venv the clone skipped.
+check "$(yesno command grep -q 'does NOT recreate <home>/venvs' "$SCRATCH/bootstrap.log")" \
+  "the_caveat_does_not_claim_the_sync_repairs_links_into_venvs" \
+  "the caveat still presents sync --force-scripts as the fix for a dangling venv link; it is not a fixpoint"
+
+# ------------------------------------------- 1c. a home with nothing in it (#10)
+
+step "A home with no skills is refused, not reported as verified"
+
+# The source is a WELL-FORMED home that holds nothing: installed/ + skills/,
+# which is what LaunchEnv.looksLikeStoreRoot asks for, and zero units. Cloning it
+# produces a home whose descriptor, policy, shims and `exec --print-env` are all
+# correct — so every check bootstrap-home.sh had passed, it printed `verified`,
+# and its last line invited the operator to launch an agent that would have no
+# skills at all. `skill-manager onboard` is the step that installs the bundled
+# ones, and it was named nowhere.
+EMPTYP="$SCRATCH/emptyproj"
+mkdir -p "$EMPTYP"
+git -C "$EMPTYP" init -q -b main
+git -C "$EMPTYP" config user.email selftest@example.invalid
+git -C "$EMPTYP" config user.name "selftest"
+printf 'x\n' > "$EMPTYP/README.md"
+git -C "$EMPTYP" add -A
+git -C "$EMPTYP" -c commit.gpgsign=false commit -qm "fixture"
+mkdir -p "$EMPTYP/.skill-manager/installed" "$EMPTYP/.skill-manager/skills"
+EMPTY_WT="$SCRATCH/emptyproj-T7"
+git -C "$EMPTYP" worktree add -q -b feature/T7 "$EMPTY_WT" main
+
+EMPTY_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$EMPTY_WT" \
+  > "$SCRATCH/empty.log" 2>&1 || EMPTY_RC=$?
+
+# Non-vacuity, and it is not optional here: a bootstrap that refused for some
+# EARLIER reason — no source, a disagreeing source, no capable CLI — would also
+# be non-zero and would also never print `verified`, and every check below would
+# pass while proving nothing about emptiness. The clone must have HAPPENED.
+check "$(yesno exists "$EMPTY_WT/.skill-manager/home.runtime.json")" \
+  "the_empty_home_fixture_really_did_produce_a_wired_home" \
+  "no descriptor at $EMPTY_WT/.skill-manager/home.runtime.json — the run failed before the emptiness could be the reason (rc=$EMPTY_RC)"
+
+check "$(yesno test "$EMPTY_RC" = 5)" \
+  "a_home_with_no_skills_exits_with_the_empty_home_code" \
+  "expected exit 5, got $EMPTY_RC; see $SCRATCH/empty.log"
+check "$(yesno absent_pattern '^  verified:' "$SCRATCH/empty.log")" \
+  "a_home_with_no_skills_is_never_reported_as_verified" \
+  "'verified:' was printed over a home holding zero skills; see $SCRATCH/empty.log"
+check "$(yesno absent_pattern 'Launch an agent bound to this home' "$SCRATCH/empty.log")" \
+  "a_home_with_no_skills_does_not_close_by_inviting_a_launch" \
+  "the run ended by telling the operator to launch an agent against an empty home"
+check "$(yesno command grep -q 'onboard' "$SCRATCH/empty.log")" \
+  "the_refusal_names_onboard_the_step_that_installs_the_bundled_skills" \
+  "the one command that fixes this is never mentioned; see $SCRATCH/empty.log"
+# And it must send the operator to the PROJECT home. Onboarding the worktree's
+# own copy would give it units the project home never had, every one of them a
+# close-out blocker before any work exists (#50).
+check "$(yesno command grep -q -- "--root '$EMPTYP' --onboard" "$SCRATCH/empty.log")" \
+  "the_refusal_points_onboard_at_the_project_home_not_the_worktree_copy" \
+  "the remedy does not name $EMPTYP; onboarding the worktree copy makes it unclosable (#50)"
 
 # --------------------------------------------- 2. where close-out reconciles to
 

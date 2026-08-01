@@ -122,6 +122,13 @@ $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-m
 #   A WORKTREE clones from its project home (<main working tree>/.skill-manager),
 #   never from $SKILL_MANAGER_HOME, because that is the home close-change.sh
 #   reconciles it back into. No project home yet -> it refuses.
+#   A home that comes out with ZERO SKILLS is REFUSED (exit 5), never reported
+#   as verified: cloning copies units, it never installs any, so an empty source
+#   yields a perfectly wired home an agent gets no skills from. The refusal names
+#   `skill-manager onboard`. --onboard runs it (--skip-gateway by default, since
+#   the gateway is a contended singleton); for a worktree the remedy is always
+#   the PROJECT home, because units installed into the copy block teardown (#50).
+#   --allow-empty accepts an empty home deliberately.
 $S/selftest.sh                                     # prove that pair on a disposable fixture, bare shell
 
 # --- change ---

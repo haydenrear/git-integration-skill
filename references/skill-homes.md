@@ -318,9 +318,45 @@ Two consequences worth stating:
   child-home record and the ledger land in the operator's global home.
 - **A clone is not a full copy.** `cache/`, `tmp/`, `logs/`, `venvs/`, `tools/`
   and `npm/` are skipped (they are re-derivable, and copying `tools/` costs
-  1.3 GB). Any CLI shim whose target was under one of those is reported by the
-  clone and re-provisioned with
-  `SKILL_MANAGER_HOME=<store> skill-manager sync --force-scripts`.
+  1.3 GB). Any CLI shim whose target was under one of those arrives **dangling**,
+  and `skill-manager home verify` refuses the home while it is. Two things about
+  the remedy, both measured:
+  - Run it with the **agent-home variables set**, not with `SKILL_MANAGER_HOME`
+    alone. `sync` ends in a binding step, and with `CLAUDE_CONFIG_DIR`,
+    `CODEX_HOME` and `GEMINI_HOME` unset that step writes the operator's
+    `~/.claude.json`, `~/.codex/config.toml` and `~/.gemini/settings.json`
+    (`ADDED claude (~/.claude.json)` — skill-manager#145). `bootstrap-home.sh`
+    prints the safe spelling; the line `home clone` itself prints is the unsafe
+    one.
+  - **It is not a fixpoint for links into `venvs/`.** `home verify` rc=1 on
+    `bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2` → run the remedy it
+    prints → `home verify` rc=1 again, identical message, `<home>/venvs` still
+    empty. Nothing in `sync` recreates a venv the clone deliberately skipped, so
+    such a home cannot pass `home verify` by following `home verify`'s own
+    instruction. That is a skill-manager gap; only the tools those links name are
+    affected, so `bootstrap-home.sh` reports it and moves on rather than
+    refusing.
+
+- **A clone of an empty home is an empty home** (git-integration-skill#10).
+  Cloning copies units; it never *installs* any. A source home holding no skills
+  therefore yields a perfectly well-formed home — right descriptor, right policy,
+  working shims, happy `exec --print-env` — that serves an agent **zero skills**.
+  The step that installs the bundled ones is `skill-manager onboard`, and it is
+  not part of the clone.
+
+  `bootstrap-home.sh` **refuses** such a home (exit `5`) rather than reporting it
+  verified, and names `onboard`. It refuses rather than running it because
+  `onboard` clones from github and touches the gateway, which is a contended
+  singleton (skill-manager#132) — too expensive to attach to the most repeated
+  command in this repo. Pass `--onboard` to have it run
+  `onboard --skip-gateway` for you, `--onboard-gateway` to include the gateway,
+  or `--allow-empty` to accept an empty home deliberately.
+
+  For a **worktree** the remedy is always the *project* home, and `--onboard` is
+  refused outright there: a worktree home is a copy of the project home and
+  `close-change.sh` reconciles it back into that same home, so units installed
+  into the copy are units the project never had — every one of them a teardown
+  blocker before any work exists (issue #50).
 
 ## The first launch is gated on change awareness (exit 8)
 

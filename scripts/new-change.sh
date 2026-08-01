@@ -144,7 +144,9 @@ if [ "$SKIP_HOME" = 1 ]; then
   info "home:      skipped (--no-home) — agents launched here will use the global home"
 else
   step "Giving the worktree its own Skill Manager home"
-  if ! "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT"; then
+  HOME_RC=0
+  "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT" || HOME_RC=$?
+  if [ "$HOME_RC" != 0 ]; then
     # ROLL THE WORKTREE BACK. Leaving it was the wrong half of a two-step
     # operation: the worktree and the branch survived, `new-change.sh <TICKET>`
     # then refused with "worktree path already exists", and the recovery
@@ -162,6 +164,22 @@ else
       git -C "$ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true
       rolled_back=1
     fi
+    # Exit 5 is bootstrap-home.sh's "the home has no skills" (#10). Distinct
+    # remedy, and the generic one below is actively wrong for it: re-running the
+    # bootstrap against the PROJECT does not install anything, so the operator
+    # would loop. The fix is `--onboard` against the project, because a worktree
+    # home is a copy of the project home and onboarding the copy instead makes it
+    # unclosable (#50).
+    if [ "$HOME_RC" = 5 ]; then
+      cat >&2 <<EOF
+
+The worktree's home was created but holds NO SKILLS, because the project home it
+is copied from holds none either. Install into the PROJECT home, then re-run:
+
+  $SCRIPT_DIR/bootstrap-home.sh --root "$ROOT" --onboard
+  $0 $TICKET${BASE:+ $BASE}
+EOF
+    else
     cat >&2 <<EOF
 
 No home could be created for this worktree, so an agent started in it would
@@ -172,6 +190,7 @@ project home yet, which one command fixes:
   $SCRIPT_DIR/bootstrap-home.sh --root "$ROOT"
   $0 $TICKET${BASE:+ $BASE}
 EOF
+    fi
     if [ "$rolled_back" = 1 ]; then
       cat >&2 <<EOF
 
