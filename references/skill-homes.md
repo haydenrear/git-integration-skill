@@ -416,6 +416,49 @@ Two consequences worth stating:
   that would create it; `--allow-unprojected` accepts one deliberately (still
   never as *verified*), and `--no-project` skips the projection step entirely.
 
+## What a bootstrap prints, and where the rest of it went
+
+A successful `bootstrap-home.sh` prints **five lines** on stderr:
+
+```
+home:      <root>/.skill-manager
+projected: N of M into each of .claude .codex .gemini
+verified:  N skill(s) servable — …
+launch:    <root>/.skill-manager/bin/launch/claude
+log:       /tmp/bootstrap-home-XXXXXX.log
+```
+
+It used to print 76 (measured on a real onboarding; 151 lines / 18.7 KB on the
+selftest fixture), two thirds of them caveats about dangling shims plus a remedy
+whose own text said it did not repair the thing it named. An agent paid ~3.1k
+tokens for that on every onboarding — on the run where nothing went wrong.
+
+Nothing was withheld, with one deliberate exception:
+
+- **The detail is in the file `log:` names**, in order, including every byte the
+  `skill-manager` CLI wrote. `--verbose` puts all of it back on stderr, live.
+  `--quiet` prints nothing at all and is what `wt` passes.
+- **The evidence stays on the console.** `projected:` and `verified:` exist so a
+  claim about this home can be *checked* rather than believed; demoting them
+  would turn the report back into an assertion. `selftest.sh` asserts the line
+  budget and the presence of those lines *in the same check*, because "the output
+  is short" is otherwise satisfied by a command that prints nothing.
+- **A failure prints a bounded tail** of the log — 20 lines, which carries every
+  refusal this script hand-writes whole — with the log's path on the line above
+  it, so the failure's own last line stays last (`wt` quotes that line as the
+  `FAILED` reason).
+- **Deleted rather than demoted:** the paragraph that told you to run
+  `sync --force-scripts` to re-provision the links a clone left dangling. Its own
+  next sentence said the command "does NOT recreate `<home>/venvs`, so a link
+  INTO `venvs/` stays dangling and `skill-manager home verify` keeps refusing
+  this home" — measured: `home verify` rc=1 → run the remedy → rc=1, identical
+  message, `venvs/` still empty. What survives is the *fact*, one counted line:
+  `warning: N link(s) in this home do not resolve …`, with the links themselves
+  in the log.
+
+`new-change.sh` does the same thing: the contract on stdout, and one line on
+stderr naming a log that holds its own narration **and** the bootstrap's.
+
 ## The first launch is gated on change awareness (exit 8)
 
 A bootstrapped home is not the same thing as a home you can launch from. There

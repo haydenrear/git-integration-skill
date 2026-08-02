@@ -92,6 +92,17 @@ same_file()    { command diff -q "$1" "$2" >/dev/null 2>&1; }
 differs_file() { ! same_file "$1" "$2"; }
 executable() { [ -n "${1:-}" ] && [ -f "$1" ] && [ -x "$1" ]; }
 yesno()     { if "$@"; then printf 1; else printf 0; fi; }
+
+# The log file a run NAMED on its own console output. bootstrap-home.sh prints
+# five lines and puts the transcript in a file, so every check below that is
+# about DETAIL reads it through this, and every check that is about the CONSOLE
+# reads the captured output directly. Keeping the two apart is the whole point of
+# the change and therefore of these assertions: a detail line that leaked back
+# onto the console fails a budget check, and a log that was named but never
+# written fails every check that reads it.
+run_log() { command sed -n 's/^log:  *//p' "$1" 2>/dev/null | command sed -n 1p; }
+# Lines of console output, blank lines included — the thing an agent pays for.
+lines_of() { command wc -l < "$1" | command tr -d ' '; }
 ok()   { PASSED=$((PASSED + 1)); printf '  PASS  %s\n' "$1" >&2; }
 bad()  { FAILED=$((FAILED + 1)); printf '  FAIL  %s\n      %s\n' "$1" "$2" >&2; }
 check() { if [ "$1" = 1 ]; then ok "$2"; else bad "$2" "$3"; fi; }
@@ -226,24 +237,48 @@ check "$(yesno absent "$WT_HOME/skills/global-only-unit")" \
   "the_worktree_home_does_not_carry_the_global_homes_unit" \
   "$WT_HOME/skills/global-only-unit exists — cloned from $GLOBAL_HOME"
 
+# The log this run named, and its contents. Everything below that is about DETAIL
+# reads it; the console is asserted separately, further down, against a line
+# budget. Its own non-vacuity comes first — a log path that was printed but never
+# written would make every `grep` over it report a clean absence forever, which is
+# the failure mode this whole file exists to refuse.
+BOOT_LOG="$(run_log "$SCRATCH/bootstrap.log")"
+check "$(yesno test -n "$BOOT_LOG")" \
+  "a_successful_bootstrap_names_the_log_that_holds_its_detail" \
+  "no 'log:' line on the console; the detail is not reachable at all (rc=$BOOTSTRAP_RC):
+$(command sed 's/^/        /' "$SCRATCH/bootstrap.log")"
+check "$(yesno test -s "${BOOT_LOG:-/nonexistent}")" \
+  "the_named_log_is_a_file_that_was_actually_written" \
+  "'${BOOT_LOG:-<none>}' is missing or empty, so every check that reads it would pass on nothing"
+
 # The closing caveat describes what THIS run did. Both halves, because the #38
 # defect was that it described a clone on a run that had not cloned: gated on
 # `bootstrapped`, which stays 0 on the `--force` path. A one-sided check would
 # pass against a banner that always prints AND against one that never does.
 #
-# Asserted on the printed BYTES rather than on an exit code — both invocations
-# below exit 0, and the whole defect is what they said while doing so.
-check "$(yesno command grep -q 'The home is a clone' "$SCRATCH/bootstrap.log")" \
+# Asserted on the WRITTEN BYTES rather than on an exit code — both invocations
+# below exit 0, and the whole defect is what they said while doing so. In the log
+# now rather than on the console: which directories a clone skipped is detail, and
+# the fact that matters — that a link in this home does not resolve — is on the
+# console as one counted line, checked below.
+check "$(yesno command grep -q 'The home is a clone' "$BOOT_LOG")" \
   "a_run_that_cloned_says_which_directories_were_skipped" \
-  "a real clone did not print the skipped-directory caveat"
+  "a real clone did not record the skipped-directory caveat"
 
 FORCE_RC=0
 bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT" --force \
   > "$SCRATCH/bootstrap-force.log" 2>&1 || FORCE_RC=$?
-check "$(yesno absent_pattern 'The home is a clone' "$SCRATCH/bootstrap-force.log")" \
+FORCE_LOG="$(run_log "$SCRATCH/bootstrap-force.log")"
+check "$(yesno test -s "${FORCE_LOG:-/nonexistent}")" \
+  "the_force_rerun_names_a_log_of_its_own" \
+  "'${FORCE_LOG:-<none>}' is missing or empty (rc=$FORCE_RC); the checks below would read nothing"
+check "$(yesno test "$FORCE_LOG" != "$BOOT_LOG")" \
+  "each_run_gets_its_own_log_rather_than_appending_to_a_shared_one" \
+  "both runs named $BOOT_LOG — two concurrent bootstraps would interleave into one file"
+check "$(yesno absent_pattern 'The home is a clone' "$FORCE_LOG")" \
   "a_force_rerun_does_not_claim_a_clone_it_did_not_do" \
-  "--force printed the clone caveat without cloning (rc=$FORCE_RC)"
-check "$(yesno command grep -q 'not re-cloning' "$SCRATCH/bootstrap-force.log")" \
+  "--force recorded the clone caveat without cloning (rc=$FORCE_RC)"
+check "$(yesno command grep -q 'not re-cloning' "$FORCE_LOG")" \
   "a_force_rerun_says_what_it_did_instead" \
   "--force did not say it was re-running rather than re-cloning (rc=$FORCE_RC)"
 check "$(yesno exists "$WT_HOME/skills/project-only-unit")" \
@@ -260,7 +295,7 @@ step "The banner describes the home it actually produced (#10)"
 
 # The count is stated, and it is the count. A `verified:` line that names no
 # number is how "verified" came to be printed over a home with nothing in it.
-VERIFIED_LINE="$(command grep -m1 '^  verified:' "$SCRATCH/bootstrap.log" || true)"
+VERIFIED_LINE="$(command grep -m1 '^verified:' "$SCRATCH/bootstrap.log" || true)"
 check "$(yesno contains "1 skill(s) servable" "$VERIFIED_LINE")" \
   "the_verified_line_states_how_many_skills_the_home_can_serve" \
   "expected the servable-skill count in '${VERIFIED_LINE:-<no verified: line>}'"
@@ -274,42 +309,132 @@ check "$(yesno contains "1 skill(s) servable" "$VERIFIED_LINE")" \
 # or not bootstrap says anything — measured while writing this, by reverting the
 # report and watching the check stay green. --force runs no clone, so the only
 # thing that can name the link there is bootstrap's own verify().
-check "$(yesno command grep -q 'bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2' "$SCRATCH/bootstrap-force.log")" \
+check "$(yesno command grep -q 'bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2' "$FORCE_LOG")" \
   "a_link_that_does_not_resolve_in_the_home_is_named_even_with_no_clone_report" \
-  "verify() did not name the dangling shim on a run that printed no clone report (rc=$FORCE_RC); see $SCRATCH/bootstrap-force.log"
+  "verify() did not name the dangling shim on a run that recorded no clone report (rc=$FORCE_RC); see $FORCE_LOG"
 
-# The remedy the caveat prints is a command an operator copy-pastes, and run as
-# it used to be spelled — SKILL_MANAGER_HOME alone — its binding step writes the
-# OPERATOR'S ~/.claude.json. Measured: `ADDED claude (~/.claude.json)`. That is
-# skill-manager#145 reached through a string printed here, so the agent-home
-# variables are asserted on the same line as the command.
+# And the fact itself reaches the CONSOLE, as one line carrying the count. This
+# is the half the log cannot do: an operator who never opens the log still has to
+# learn that `skill-manager home verify` will refuse this home. Both halves are
+# asserted, because "the detail moved to the log" and "the finding was dropped"
+# are the same log file and different outcomes.
+DANGLING_LINE="$(command grep -m1 '^warning:.*do not resolve' "$SCRATCH/bootstrap-force.log" || true)"
+check "$(yesno contains "1 link(s)" "$DANGLING_LINE")" \
+  "the_console_still_says_how_many_links_in_this_home_do_not_resolve" \
+  "expected a counted one-line warning, got '${DANGLING_LINE:-<no warning: line>}'"
+check "$(yesno contains "home verify" "$DANGLING_LINE")" \
+  "the_console_warning_says_what_the_unresolved_links_cost" \
+  "'${DANGLING_LINE:-<none>}' does not say that \`home verify\` refuses the home over them"
+
+# --------------- what was DELETED, and the property that outlived it
 #
-# Scoped to the caveat THIS SCRIPT writes — the tail of the log from `The home
-# is a clone` onward — because `home clone` prints the unsafe spelling itself,
-# higher up, and that string belongs to skill-manager. Measured while writing
-# this check: the CLI's own line reads
-#   re-provision with `SKILL_MANAGER_HOME=<home> skill-manager sync --force-scripts`
-# which is the hijack verbatim. This repo cannot fix that line, so the caveat now
-# contradicts it in words and the assertion is made where the fix lives.
-CAVEAT="$(command sed -n '/The home is a clone/,$p' "$SCRATCH/bootstrap.log" || true)"
-SYNC_LINE="$(printf '%s\n' "$CAVEAT" | command grep -m1 'sync --force-scripts' || true)"
-check "$(yesno test -n "$SYNC_LINE")" \
-  "the_clone_caveat_still_prints_a_sync_command_to_check" \
-  "no 'sync --force-scripts' line in the caveat at all, so the next check would prove nothing"
-check "$(yesno contains "CLAUDE_CONFIG_DIR=$WT" "$SYNC_LINE")" \
-  "a_printed_sync_command_pins_the_agent_home_env_too" \
-  "'$SYNC_LINE' names the home but not CLAUDE_CONFIG_DIR — run from a bare shell it
-      writes the operator's ~/.claude.json (skill-manager#145)"
-check "$(yesno contains "not the one" "$CAVEAT")" \
-  "the_caveat_warns_off_the_unsafe_spelling_the_cli_printed_above_it" \
-  "the CLI's own SKILL_MANAGER_HOME-only remedy is left standing as the last word"
+# This spot used to assert three things about a nine-line closing paragraph that
+# told the operator to run `<pinned env> skill-manager sync --force-scripts` and
+# then, three lines later in its own text, that the command "does NOT recreate
+# <home>/venvs, so a link INTO venvs/ stays dangling and `skill-manager home
+# verify` keeps refusing this home". Measured, and that is why the sentence
+# existed: `home verify` rc=1 -> run the remedy -> `home verify` rc=1, identical
+# message, <home>/venvs still empty.
+#
+# A remedy whose own paragraph says it does not remedy is not detail. It is
+# deleted rather than demoted, and the assertion is that NO SCRIPT HERE OFFERS IT
+# ANY MORE — a static sweep, with the sentence that shipped as its control, so
+# "no script contains it" cannot be true of a pattern that matches nothing.
+FS_CONTROL="$SCRATCH/force-scripts-control.txt"
+cat > "$FS_CONTROL" <<'EOF'
+  $(home_env_prefix) $CLI sync --force-scripts
+re-provisions the shims it can re-derive.
+EOF
+check "$(yesno command grep -q 'sync --force-scripts$' "$FS_CONTROL")" \
+  "the_deleted_remedy_pattern_matches_the_line_that_shipped" \
+  "the pattern does not match the text it is meant to keep out, so the next check proves nothing"
+FS_OFFERS=""
+for f in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt"; do
+  [ -f "$f" ] || continue
+  case "$(basename "$f")" in selftest.sh) continue ;; esac
+  # Offered as a COMMAND — a line ending in the option — rather than merely
+  # mentioned: bootstrap-home.sh still names the spelling in prose, to warn the
+  # reader off the one `home clone` prints for itself, and that sentence is the
+  # opposite of the defect.
+  if command grep -q 'sync --force-scripts$' "$f"; then
+    FS_OFFERS="$FS_OFFERS $(basename "$f")"
+  fi
+done
+check "$(yesno test -z "$FS_OFFERS")" \
+  "no_script_here_still_offers_the_sync_that_cannot_repair_what_it_names" \
+  "these print it as a remedy:$FS_OFFERS"
 
-# And it must not claim a repair it cannot make. Measured: `home verify` rc=1 ->
-# run this exact remedy -> `home verify` rc=1, same message, <home>/venvs still
-# empty. Nothing in `sync` recreates a venv the clone skipped.
-check "$(yesno command grep -q 'does NOT recreate <home>/venvs' "$SCRATCH/bootstrap.log")" \
-  "the_caveat_does_not_claim_the_sync_repairs_links_into_venvs" \
-  "the caveat still presents sync --force-scripts as the fix for a dangling venv link; it is not a fixpoint"
+# The property that paragraph was carrying, kept and re-anchored. Every
+# home-mutating command this script prints must pin BOTH axes: run with
+# SKILL_MANAGER_HOME alone, a sync's binding step writes the OPERATOR'S
+# ~/.claude.json — measured, `ADDED claude (~/.claude.json)`, skill-manager#145,
+# reached by copy-pasting a line this file printed. `home_env_prefix` pins both,
+# and the exit-5 refusal further down is a string this script owns end to end, so
+# that is where the property is now asserted. See
+# `a_printed_remedy_pins_the_agent_home_env_too` below.
+
+# --------------------------- and the console budget the detail was moved for
+#
+# Measured on this fixture before the change: 151 lines / 18717 bytes on a
+# SUCCESSFUL bootstrap. An agent reading that pays for it on every onboarding,
+# and pays it on the run where nothing went wrong.
+#
+# THE BUDGET AND THE EVIDENCE ARE ONE CHECK, deliberately. "The output is short"
+# passes trivially when a command prints nothing, and a bootstrap that printed
+# nothing would be a worse regression than the one being fixed — `projected:` and
+# `verified:` exist so that a claim about this home can be CHECKED rather than
+# believed. So the predicate is a conjunction: under budget AND still carrying
+# every line that constitutes evidence AND naming the log that holds the rest.
+# Individual checks follow it for diagnosis; the conjunction is the assertion.
+#
+# EIGHT: five summary lines — home, projected, verified, launch, log — plus up to
+# three conditional one-line warnings, of which this fixture (a seeded dangling
+# shim) triggers one. It is not a round number chosen for comfort; it is the
+# shape of the output, and anything that pushes past it is a line that has been
+# added rather than a line that was already there.
+CONSOLE_BUDGET=8
+
+under_budget_with_evidence() {
+  local f="$1"
+  [ "$(lines_of "$f")" -le "$CONSOLE_BUDGET" ] || return 1
+  command grep -q '^projected: [0-9][0-9]* of [0-9][0-9]* into each of ' "$f" || return 1
+  command grep -q '^verified: .*[0-9] skill(s) servable' "$f" || return 1
+  command grep -q '^log: *[^ ]' "$f" || return 1
+  return 0
+}
+
+check "$(yesno under_budget_with_evidence "$SCRATCH/bootstrap.log")" \
+  "a_successful_bootstrap_is_under_budget_AND_still_prints_its_evidence" \
+  "$(lines_of "$SCRATCH/bootstrap.log") line(s) / $(command wc -c < "$SCRATCH/bootstrap.log" | command tr -d ' ') byte(s),
+      budget $CONSOLE_BUDGET, and the evidence lines present are:
+$(command grep -E '^(projected|verified|log):' "$SCRATCH/bootstrap.log" | command sed 's/^/        /' || printf '        <none>')
+      Both halves matter: short-with-no-evidence is not an improvement on long."
+
+check "$(yesno command grep -q "^projected: 1 of 1 into each of " "$SCRATCH/bootstrap.log")" \
+  "the_projection_evidence_survives_on_the_console" \
+  "'projected: N of M into each of …' was demoted; it is what makes 'verified' checkable"
+check "$(yesno command grep -q '^launch: ' "$SCRATCH/bootstrap.log")" \
+  "the_console_ends_by_naming_the_next_move" \
+  "no 'launch:' line — the one thing the operator does next"
+
+# The other side of the same coin: the CLI transcript that used to be printed is
+# not merely shorter, it is somewhere. A budget check alone is satisfied by
+# throwing the detail away.
+check "$(yesno test "$(lines_of "$BOOT_LOG")" -gt "$(lines_of "$SCRATCH/bootstrap.log")")" \
+  "the_detail_the_console_no_longer_carries_is_in_the_log" \
+  "the log has $(lines_of "$BOOT_LOG") line(s) and the console $(lines_of "$SCRATCH/bootstrap.log") — the detail was dropped, not moved"
+
+# --verbose restores it, on stderr, live. Without this the quiet path is a way of
+# hiding a failure rather than of deferring detail.
+VERB_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT" --force --verbose \
+  > "$SCRATCH/bootstrap-verbose.out" 2> "$SCRATCH/bootstrap-verbose.err" || VERB_RC=$?
+check "$(yesno test "$(lines_of "$SCRATCH/bootstrap-verbose.err")" -gt "$CONSOLE_BUDGET")" \
+  "verbose_puts_the_whole_transcript_back_on_stderr" \
+  "--verbose printed $(lines_of "$SCRATCH/bootstrap-verbose.err") line(s) (rc=$VERB_RC), no more than the quiet path's budget"
+check "$(yesno command grep -q '^verified: ' "$SCRATCH/bootstrap-verbose.err")" \
+  "verbose_still_ends_with_the_evidence" \
+  "--verbose lost the verified: line while restoring everything else"
 
 # ----------------------- 1b2. the skills have to reach an AGENT, not the store
 #
@@ -374,15 +499,16 @@ done
 # no `verified:` line and "it did not claim what it could not do" would be
 # trivially true — then the POSITIVE direction, with the number matching the
 # links that were just counted rather than the store.
-PROJ_SKILLS_LINE="$(command grep -m1 '^  skills:' "$SCRATCH/proj.log" || true)"
+PROJ_LOG="$(run_log "$SCRATCH/proj.log")"
+PROJ_SKILLS_LINE="$(command grep -m1 '^  skills:' "${PROJ_LOG:-/nonexistent}" 2>/dev/null || true)"
 check "$(yesno test -n "$PROJ_SKILLS_LINE")" \
   "the_projection_run_got_far_enough_to_report_on_the_home" \
-  "no 'skills:' line in $SCRATCH/proj.log — the checks below would be about a run that died first"
-PROJ_VERIFIED="$(command grep -m1 '^  verified:' "$SCRATCH/proj.log" || true)"
+  "no 'skills:' line in ${PROJ_LOG:-<no log named>} — the checks below would be about a run that died first"
+PROJ_VERIFIED="$(command grep -m1 '^verified:' "$SCRATCH/proj.log" || true)"
 check "$(yesno contains "$STORE_UNITS skill(s) servable" "$PROJ_VERIFIED")" \
   "a_fully_projected_home_is_reported_as_verified_with_the_projected_count" \
   "expected '$STORE_UNITS skill(s) servable', got '${PROJ_VERIFIED:-<no verified: line>}'"
-check "$(yesno command grep -q "^  projected: $STORE_UNITS of $STORE_UNITS" "$SCRATCH/proj.log")" \
+check "$(yesno command grep -q "^projected: $STORE_UNITS of $STORE_UNITS" "$SCRATCH/proj.log")" \
   "the_run_states_how_many_of_the_stores_skills_an_agent_can_reach" \
   "no 'projected: $STORE_UNITS of $STORE_UNITS' line; see $SCRATCH/proj.log"
 
@@ -407,11 +533,11 @@ mkdir -p "$WTP/.claude/skills"
 # (1) the link is simply gone — the case the store count could not see.
 command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
 remeasure "proj-deleted.log"
-check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-deleted.log")" \
+check "$(yesno command grep -q "^projected: 0 of $STORE_UNITS" "$SCRATCH/proj-deleted.log")" \
   "deleting_one_agent_link_changes_the_reported_projection_count" \
   "the count did not move when a link was removed — it is counting the store, not the links:
-$(command grep -m1 '^  projected:' "$SCRATCH/proj-deleted.log" || printf '        <no projected: line>')"
-check "$(yesno absent_pattern '^  verified:' "$SCRATCH/proj-deleted.log")" \
+$(command grep -m1 '^projected:' "$SCRATCH/proj-deleted.log" || printf '        <no projected: line>')"
+check "$(yesno absent_pattern '^verified:' "$SCRATCH/proj-deleted.log")" \
   "a_home_with_a_missing_agent_link_is_not_reported_as_verified" \
   "'verified:' was printed over a home an agent cannot read $BROKEN_UNIT from"
 
@@ -419,7 +545,7 @@ check "$(yesno absent_pattern '^  verified:' "$SCRATCH/proj-deleted.log")" \
 #     this from a working link.
 ln -s "$WTP_HOME/skills/no-such-unit-at-all" "$WTP/.claude/skills/$BROKEN_UNIT" || true
 remeasure "proj-dangling.log"
-check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-dangling.log")" \
+check "$(yesno command grep -q "^projected: 0 of $STORE_UNITS" "$SCRATCH/proj-dangling.log")" \
   "a_dangling_agent_link_does_not_count_as_a_projection" \
   "a link to a nonexistent target was counted; see $SCRATCH/proj-dangling.log"
 
@@ -429,7 +555,7 @@ check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-
 command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
 ln -s "$PROJ_HOME/skills/$BROKEN_UNIT" "$WTP/.claude/skills/$BROKEN_UNIT" || true
 remeasure "proj-foreign.log"
-check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-foreign.log")" \
+check "$(yesno command grep -q "^projected: 0 of $STORE_UNITS" "$SCRATCH/proj-foreign.log")" \
   "an_agent_link_that_resolves_into_another_checkout_does_not_count" \
   "a link into $PROJ_HOME was counted as this home serving the unit; see $SCRATCH/proj-foreign.log"
 
@@ -458,7 +584,7 @@ check "$(yesno test "$REPAIR_RC" = 0)" \
 check "$(yesno exists "$WTP/.claude/skills/$BROKEN_UNIT")" \
   "the_repaired_link_is_there_and_resolves" \
   "$WTP/.claude/skills/$BROKEN_UNIT still does not resolve after the repair run"
-check "$(yesno command grep -q '^  verified:' "$SCRATCH/proj-repair.log")" \
+check "$(yesno command grep -q '^verified:' "$SCRATCH/proj-repair.log")" \
   "the_repaired_home_is_reported_as_verified_again" \
   "the repair run did not print 'verified:'; see $SCRATCH/proj-repair.log"
 
@@ -512,15 +638,44 @@ check "$(yesno exists "$EMPTY_WT/.skill-manager/home.runtime.json")" \
 check "$(yesno test "$EMPTY_RC" = 5)" \
   "a_home_with_no_skills_exits_with_the_empty_home_code" \
   "expected exit 5, got $EMPTY_RC; see $SCRATCH/empty.log"
-check "$(yesno absent_pattern '^  verified:' "$SCRATCH/empty.log")" \
+check "$(yesno absent_pattern '^verified:' "$SCRATCH/empty.log")" \
   "a_home_with_no_skills_is_never_reported_as_verified" \
   "'verified:' was printed over a home holding zero skills; see $SCRATCH/empty.log"
-check "$(yesno absent_pattern 'Launch an agent bound to this home' "$SCRATCH/empty.log")" \
+# `launch:` is the console's closing line on a good run, so its ABSENCE here is
+# the property — and a negative check needs the positive one beside it or a
+# renamed key would satisfy it forever. The positive is taken from the run at the
+# top of this file, which is the same script printing the same key.
+check "$(yesno absent_pattern '^launch:' "$SCRATCH/empty.log")" \
   "a_home_with_no_skills_does_not_close_by_inviting_a_launch" \
   "the run ended by telling the operator to launch an agent against an empty home"
+check "$(yesno command grep -q '^launch:' "$SCRATCH/bootstrap.log")" \
+  "the_key_whose_absence_is_asserted_above_is_one_this_script_really_prints" \
+  "no 'launch:' line on a GOOD run either, so its absence on an empty home proves nothing"
 check "$(yesno command grep -q 'onboard' "$SCRATCH/empty.log")" \
   "the_refusal_names_onboard_the_step_that_installs_the_bundled_skills" \
   "the one command that fixes this is never mentioned; see $SCRATCH/empty.log"
+
+# skill-manager#145, re-anchored here from the deleted clone caveat: every
+# home-mutating command this script prints must pin the agent-home variables as
+# well as the home. With CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_HOME unset, the
+# binding step writes the OPERATOR'S ~/.claude.json — measured, `ADDED claude
+# (~/.claude.json)`, from a line this file printed. This refusal is a string
+# bootstrap-home.sh owns end to end, so it is where the property is checked.
+EMPTY_PROJ_RC=0
+# --force because the fixture scaffolded this project home directly: without it
+# the run stops at "exists and is not empty" and never reaches the gate whose
+# remedy is the subject here.
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$EMPTYP" --force \
+  > "$SCRATCH/empty-project.log" 2>&1 || EMPTY_PROJ_RC=$?
+ONBOARD_LINE="$(command grep -m1 'onboard --skip-gateway' "$SCRATCH/empty-project.log" || true)"
+check "$(yesno test -n "$ONBOARD_LINE")" \
+  "the_empty_project_refusal_prints_an_onboard_command_to_check" \
+  "no 'onboard --skip-gateway' line at all (rc=$EMPTY_PROJ_RC), so the next check would prove nothing:
+$(command sed 's/^/        /' "$SCRATCH/empty-project.log")"
+check "$(yesno contains "CLAUDE_CONFIG_DIR=$EMPTYP" "$ONBOARD_LINE")" \
+  "a_printed_remedy_pins_the_agent_home_env_too" \
+  "'$ONBOARD_LINE' names the home but not CLAUDE_CONFIG_DIR — run from a bare shell it
+      writes the operator's ~/.claude.json (skill-manager#145)"
 # And it must send the operator to the PROJECT home. Onboarding the worktree's
 # own copy would give it units the project home never had, every one of them a
 # close-out blocker before any work exists (#50).
