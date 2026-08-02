@@ -12,35 +12,77 @@ ticket and a worktree, but no submodules** — the worktree is just files.
 ```
 
 Run it from anywhere inside the repo you want branched. It resolves the repo,
-creates the worktree, gives it its own Skill Manager home, and prints the
-contract. **Everything an agent needs next is on stdout**, one key per line,
-every value a path or a command that runs:
+creates the worktree, gives it its own Skill Manager home, and answers in **one
+line**:
 
-| Key | What it is |
+```
+created worktree /repos/deploy-helm-TICKET-123
+closed worktree /repos/deploy-helm-TICKET-123 (branch feature/TICKET-123 kept)
+```
+
+That is the whole successful output, on stdout, with nothing on stderr.
+
+### Why one line, and where the rest went
+
+The path is the only fact on it that an agent cannot work out for itself.
+Everything else follows from the path *by construction*:
+
+| What you might want | Where it comes from |
 |---|---|
-| `WORKTREE` | where to edit |
-| `BRANCH` | what was branched, from what, in which repo and of what kind |
-| `LAUNCH` | starts an agent bound to **this worktree's** home |
-| `IF-EXIT-8` | clears the first-launch drift gate (see below) — run it only if `LAUNCH` refuses with exit 8 |
-| `CLOSE` | tears the worktree down through the close-out gate |
-| `PROPAGATE` | the constituent fan-out; printed only for an `integration` repo |
+| where to edit | the path |
+| the launcher | `<worktree>/.skill-manager/bin/launch/claude` |
+| the drift-gate remedy, if `LAUNCH` refuses with **exit 8** | `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack` |
+| the teardown | `wt close TICKET-123` — the other half of what you just typed |
+| the branch | `feature/TICKET-123`, and `wt close` names it when it differs |
+| the constituent fan-out (integration repos) | `propagate.sh TICKET-123` |
 
-A refusal is two lines — `FAILED` (what) and `FIX` (one command that runs) —
-with the full explanation on stderr. `--verbose` shows that explanation on a
-successful run too.
+`wt new` and `wt close` run constantly, and four long absolute paths restating
+the fifth is a cost paid on every one of them. `IF-EXIT-8` was the clearest
+case: a remedy for a gate that has not fired, printed on every run in which it
+never fires.
 
-**The two key sets are exclusive.** A run prints the success keys or the failure
-keys, never both, and the exit code agrees. `wt close <T> --force` is a
-*success*: it prints `CLOSED` / `BRANCH` / `DELETE` and exits 0. The gate's
-refusal — the list of work being discarded — is still printed in full, on
-stderr, and `wt` shows it without `--verbose` for exactly this one case, because
-a teardown that destroys work and says nothing anywhere would be a worse defect
-than the one this rule fixes.
+**The keys are not gone, they are on demand.** All six are still printed, as the
+same `KEY  value` contract as before, by any of:
 
-**The keys are the interface, not the path.** git-issue-skill#4 asks whether
-worktree provisioning should live in `git-issue` or in `skill-manager` rather
-than here; a caller that reads these keys keeps working across such a move, and
-one that parses the prose never could. If you add a key, add it to this table.
+```bash
+wt info TICKET-123           # a worktree that exists; creates and removes nothing
+wt new TICKET-123 --verbose  # on the run that creates it
+wt close TICKET-123 --dry-run   # CLEAN / CLOSE — would this close cleanly?
+wt close TICKET-123 --force     # CLOSED / BRANCH / DELETE, plus what it discarded
+```
+
+`new-change.sh` and `close-change.sh` emit that contract unchanged; `wt`
+summarises it. **The keys are still the interface, not the path.**
+git-issue-skill#4 asks whether worktree provisioning should live in `git-issue`
+or in `skill-manager` rather than here; a caller that reads these keys keeps
+working across such a move, and one that parses the one-line summary never
+could — read `wt info` instead. If you add a key, add it to this table.
+
+### A refusal
+
+Three lines, because when nothing happened the next move is not derivable from
+anything:
+
+```
+error closing worktree: `home close-out` exited 1: this worktree holds work that removing it would destroy.
+fix: skill-manager home sync --from /repos/deploy-helm-TICKET-123/.skill-manager --to /repos/deploy-helm/.skill-manager
+log: /tmp/wt-9fK2aQ.log
+```
+
+`fix:` is the **first blocker's own remedy**, not `--force`: `--force` is always
+available and is the one that throws the work away, so a refusal that leads with
+it teaches the operator to discard. The reasoning — the gate's full transcript,
+every blocking unit and every conflicted file — is in the file `log:` names and
+is never printed. Read it when the `fix:` line is not enough.
+
+**The two outcomes are exclusive.** A run reports success or refusal, never
+both, and the exit code agrees. `wt close <T> --force` is a *success*: it prints
+`CLOSED` / `BRANCH` / `DELETE` and exits 0. The gate's refusal — the list of
+work being discarded — is still printed in full, on stderr, without `--verbose`,
+for exactly this one case, because a teardown that destroys work and says
+nothing anywhere would be a worse defect than the one this rule fixes. It is
+also why `--force` is the one flag that does *not* get the one-line summary:
+what was thrown away is the only thing worth printing.
 
 The rest of this page is the *explanation*: which repo gets branched and why,
 where the worktree may live, and what the gates are for. It is worth reading

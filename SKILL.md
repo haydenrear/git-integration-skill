@@ -108,30 +108,41 @@ cost an agent two commands and no reading. It does:
 <this-skill>/scripts/wt close TICKET-123     # teardown, through the close-out gate
 ```
 
-**Stdout is the contract and carries nothing else.** Act on it directly; there
-is nothing to look up.
+**A successful run costs one line, and the path on it is the answer.**
 
 ```
-WORKTREE   /path/to/repo-TICKET-123
-BRANCH     feature/TICKET-123 (from main, constituent repo deploy-helm)
-LAUNCH     /path/to/repo-TICKET-123/.skill-manager/bin/launch/claude
-IF-EXIT-8  /path/to/repo-TICKET-123/.skill-manager/bin/cli/skill-manager home drift --ack
-CLOSE      <this-skill>/scripts/wt close TICKET-123
-PROPAGATE  <this-skill>/scripts/propagate.sh TICKET-123   # integration repos only
+created worktree /path/to/repo-TICKET-123
+closed worktree /path/to/repo-TICKET-123 (branch feature/TICKET-123 kept)
 ```
 
-A failure is two lines, and the second one runs:
+Everything else follows from that path by construction, so it is not printed:
+the launcher is `<worktree>/.skill-manager/bin/launch/claude`, the drift-gate
+remedy is `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack`,
+and the teardown is `wt close TICKET-123`. When you want them spelled out — for
+a worktree that already exists, creating and removing nothing:
+
+```bash
+<this-skill>/scripts/wt info TICKET-123    # WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE
+```
+
+A failure is three lines, and the second one runs:
 
 ```
-FAILED     the project home /path/to/repo/.skill-manager holds no skills, ...
-FIX        <this-skill>/scripts/bootstrap-home.sh --root /path/to/repo --onboard
+error creating worktree: the project home /path/to/repo/.skill-manager holds no skills, ...
+fix: <this-skill>/scripts/bootstrap-home.sh --root /path/to/repo --onboard
+log: /tmp/new-change-a1b2c3.log
 ```
+
+The reasoning is never printed — it is in the file the third line names, in
+full. Read it when the `fix:` line is not enough, and not before.
 
 `wt` holds no policy of its own — it picks a verb, suppresses the prose, and
-forwards the contract that `new-change.sh` and `close-change.sh` emit. Those two
-remain the implementation and remain a matched pair (issue #50). Add `--verbose`
-to see everything they say. The rest of this page and `references/worktrees.md`
-explain *why* each line is what it is; the happy path does not need them.
+summarises the contract that `new-change.sh` and `close-change.sh` emit. Those
+two remain the implementation and remain a matched pair (issue #50), and the
+whole key set is still printed by `wt info`, `wt … --verbose`, `wt close
+--dry-run` and `wt close --force`. The rest of this page and
+`references/worktrees.md` explain *why* each line is what it is; the happy path
+does not need them.
 
 ## Quick reference
 

@@ -132,6 +132,56 @@
 # it was invoked from.
 set -euo pipefail
 
+# ------------------------------------------------------------------- --help
+#
+# ANSWERED HERE, and not forwarded. This script `exec`s bootstrap-home.sh, and
+# forwarding "$@" verbatim meant `agent-home.sh --help` printed
+# bootstrap-home.sh's usage — a different program's name, a different option
+# set, and no mention of the two things a caller of THIS file needs (that it is
+# a locator, and that --print-env is how a shell binds to the home). Measured on
+# a fresh agent: 4.5 KB spent reading the same help twice, once through each
+# name, before noticing they were the same text.
+#
+# Every OTHER option is still forwarded verbatim, which is the point of the
+# file. This is the one that has an answer here, because the question it asks —
+# "what does agent-home.sh do" — is about this file.
+#
+# Before anything else runs: --help must work outside a git repository, from a
+# checkout with no home, and with no usable bootstrap-home.sh anywhere. It is
+# what a caller reaches for when one of those is exactly the problem.
+usage() {
+  cat <<'EOF'
+usage: agent-home.sh [--root DIR] [--print-env] [--force] [--onboard] [...]
+
+Give THIS checkout its own Skill Manager home, so an agent started here cannot
+write the operator's global ~/.skill-manager.
+
+  agent-home.sh                        create <repo>/.skill-manager (+ .claude,
+                                       .codex, .gemini) and the launch shims.
+                                       Idempotent; safe to re-run.
+  eval "$(agent-home.sh --print-env)"  bind the CURRENT shell to that home.
+  agent-home.sh --root DIR             bootstrap DIR instead of the checkout
+                                       you are standing in.
+
+Then launch through the shims, which export the whole contract for you:
+
+  <repo>/.skill-manager/bin/launch/{claude,codex,gemini}
+
+Worktrees do not need this: `wt new` bootstraps every worktree it creates.
+
+THIS FILE IS A LOCATOR. It finds this skill's scripts/bootstrap-home.sh —
+pinnable with $INTEGRATION_BOOTSTRAP_HOME — and execs it, so every option not
+listed above is bootstrap-home.sh's and is forwarded unread. Its own usage:
+
+  bootstrap-home.sh --help
+EOF
+}
+for _a in ${@+"$@"}; do
+  case "$_a" in
+    -h|--help|help) usage; exit 0 ;;
+  esac
+done
+
 # The directory this file was resolved from — a checkout that vendored scripts/,
 # or an installed `<home>/skills/git-integration-repo`. Used ONLY to find a
 # bootstrap-home.sh, never as the target.

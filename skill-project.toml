@@ -21,10 +21,24 @@
 # ~/.skill-manager. Create the local home first, point `SKILL_MANAGER_HOME` at
 # it, and only then resolve. This repo's own script is the one that does it:
 #
-#   mkdir -p .skill-manager/skills
-#   SKILL_MANAGER_CLI=<epic skill-manager> bash scripts/bootstrap-home.sh --root "$PWD" --force
+#   SKILL_MANAGER_CLI=<epic skill-manager> bash scripts/bootstrap-home.sh --root "$PWD"
 #   export SKILL_MANAGER_HOME="$PWD/.skill-manager"
 #   skill-manager project resolve --project-dir "$PWD" --skip-gateway
+#
+# DO NOT create `.skill-manager/` first. This recipe used to open with
+# `mkdir -p .skill-manager/skills`, and that line broke the whole sequence on
+# its first use: `home clone` requires an absent or empty destination, so the
+# mkdir manufactured exactly the state bootstrap-home.sh refuses —
+#
+#   .skill-manager exists and is not empty — inspect it, then pass --force …
+#
+# — and passing the `--force` the recipe itself carried made it worse rather
+# than better, because --force means "re-run the steps on an EXISTING home" and
+# therefore skips the clone; three steps later the run died with `home policy
+# --live` reporting a directory that "carries neither a descriptor nor the
+# installed/ + skills/ pair". bootstrap-home.sh creates the home. Nothing needs
+# to exist first, and `--force` belongs only on a re-run against a home that is
+# already there.
 #
 # `SKILL_MANAGER_HOME` alone does not redirect the agent-home projections;
 # export `CLAUDE_CONFIG_DIR`, `CLAUDE_HOME`, `CODEX_HOME` and `GEMINI_HOME` at
