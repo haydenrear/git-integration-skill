@@ -121,6 +121,146 @@ STORE="$ROOT/.skill-manager"
 GLOBAL_HOME="$HOME/.skill-manager"
 [ -d "$GLOBAL_HOME" ] && GLOBAL_HOME="$(cd "$GLOBAL_HOME" && pwd -P)"
 
+# ------------------------------------------- what this run leaves in the tree
+#
+# git-integration-skill: onboarding created `<root>/.claude.json` — a file no
+# documented ignore rule covers, because the documented rules are `/.claude/`,
+# `/.codex/`, `/.gemini/`, `/.skill-manager/` and `/.claude/` does not match
+# `/.claude.json`. The next command an operator runs is `wt new`, which asserts
+# a clean tree, and it refused: `working tree is not clean`. Onboarding a repo
+# made the repo unusable by the next step of onboarding it.
+#
+# Fixing that by adding a fifth rule to the documented list would be the same
+# enumeration one entry longer — and it fails the moment the product moves or
+# renames the file (which it is doing: the `.claude.json` location is
+# skill-manager's own defect, being fixed there). So this is measured instead of
+# enumerated: LIST THE UNTRACKED TOP-LEVEL ENTRIES BEFORE ANY WORK, LIST THEM
+# AGAIN AFTER, AND IGNORE THE DIFFERENCE. Whatever this run created is by
+# construction this run's to ignore, whatever it is called.
+#
+# It goes in `$GIT_COMMON_DIR/info/exclude`, not in `.gitignore`:
+#
+#   * `.gitignore` is TRACKED. Appending to it to make the tree clean makes the
+#     tree dirty — one modified file instead of one untracked one — and `wt new`
+#     refuses either way until someone commits it. It cannot be the mechanism
+#     that leaves a tree clean.
+#   * the exclude file is per-clone and appears in no diff, which is exactly
+#     what a per-checkout, gitignored home is.
+#   * it is read from the COMMON dir, so one write covers the main tree and
+#     every linked worktree, and the `/`-anchored rules apply at each worktree
+#     root separately — which is what is wanted, since every worktree gets its
+#     own home.
+#
+# The shared, committed rules still belong in `.gitignore` for the team;
+# references/skill-homes.md says so and now lists `/.claude.json` among them.
+# This is the safety net that makes the CURRENT checkout clean without waiting
+# for that commit, and it adds nothing when `.gitignore` already covers a path,
+# because git does not report an ignored path as untracked in the first place.
+
+# Top-level untracked entries, one per line, directories with a trailing slash.
+# Deliberately depth-1: the unit of ignoring here is "a thing the home
+# machinery put at the root", never a file inside the operator's own new
+# directory.
+untracked_root_entries() {
+  git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null \
+    | while IFS= read -r line; do
+        case "$line" in
+          '?? "'*) continue ;;   # a path git had to quote; leave it alone
+          '?? '*) : ;;
+          *) continue ;;
+        esac
+        local path="${line#?? }"
+        case "$path" in
+          */*) printf '%s/\n' "${path%%/*}" ;;
+          *)   printf '%s\n' "$path" ;;
+        esac
+      done | sort -u
+}
+
+IGNORE=1
+UNTRACKED_BEFORE=""
+git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || IGNORE=0
+[ "$IGNORE" = 0 ] || UNTRACKED_BEFORE="$(untracked_root_entries)"
+
+# The names the home machinery owns at the root, as PREFIXES, read from the
+# descriptor rather than listed here. `<agent dir basename>*` is the predicate,
+# and it is the one that generalises: `.claude` and `.claude.json` are the same
+# agent's state under different suffixes, which is exactly the distinction the
+# documented four-rule `.gitignore` could not make. It also survives the file
+# moving or being renamed, which skill-manager is in the middle of doing.
+#
+# Nothing outside those prefixes is ever matched by this rule, so the widest it
+# can reach is `.claude*`, `.codex*`, `.gemini*`, `.skill-manager*` — names that
+# belong to a per-checkout home by construction.
+home_owned_root_prefixes() {
+  printf '%s\n' "$(basename "$STORE")"
+  descriptor_env_dirs | while IFS= read -r dir; do
+    [ -n "$dir" ] && basename "$dir"
+  done
+}
+
+# Add an exclude rule for every top-level entry this run created and left
+# untracked, and for every untracked entry the home machinery owns by name.
+# Idempotent, and silent when there is nothing to add.
+#
+# Two rules, not one, because they cover different runs. The first catches
+# whatever THIS run produced, whatever it is called — including a file no rule
+# anticipates. The second catches what an earlier `install` / `sync` /
+# `project resolve` left behind, which the first cannot see: on a re-run those
+# files are already untracked before this script starts, so "new since the
+# snapshot" is empty and the tree stays dirty. The documented onboarding
+# sequence is bootstrap-then-install, so that re-run IS the ordinary case.
+ensure_run_artifacts_ignored() {
+  [ "$IGNORE" = 1 ] || return 0
+  local common excl after entry rule prefix owned added=0
+  common="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  [ -n "$common" ] || return 0
+  case "$common" in /*) : ;; *) common="$ROOT/$common" ;; esac
+  [ -d "$common" ] || return 0
+  excl="$common/info/exclude"
+  after="$(untracked_root_entries)"
+  owned="$(home_owned_root_prefixes)"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if printf '%s\n' "$UNTRACKED_BEFORE" | command grep -qxF "$entry"; then
+      # Not new. Ignore it only if the home machinery owns the name; anything
+      # else the operator already had untracked is theirs, and silently
+      # excluding it would hide their own work.
+      local keep=1
+      while IFS= read -r prefix; do
+        [ -n "$prefix" ] || continue
+        case "${entry%/}" in "$prefix"|"$prefix".*) keep=0; break ;; esac
+      done <<INNER
+$owned
+INNER
+      [ "$keep" = 0 ] || continue
+    fi
+    rule="/$entry"
+    [ -f "$excl" ] && command grep -qxF "$rule" "$excl" && continue
+    mkdir -p "$common/info"
+    if [ "$added" = 0 ]; then
+      printf '\n# git-integration-repo bootstrap-home.sh: per-checkout Skill Manager\n# home artefacts, created at %s. Local to this clone; the shared rules\n# belong in .gitignore (references/skill-homes.md).\n' \
+        "$ROOT" >> "$excl"
+      added=1
+    fi
+    printf '%s\n' "$rule" >> "$excl"
+    say "ignored:   $rule -> $excl"
+  done <<EOF
+$after
+EOF
+  # Say it either way. "The tree is clean" is the property the next command
+  # (`wt new`) depends on, and reporting it only when something was added makes
+  # the silent case indistinguishable from the case where the check never ran.
+  local still; still="$(git -C "$ROOT" status --porcelain 2>/dev/null | command head -5)"
+  if [ -n "$still" ]; then
+    printf '  WARNING: %s is not clean after the bootstrap, so `wt new` will refuse it:\n' "$ROOT" >&2
+    printf '    %s\n' "$still" >&2
+    printf '    Commit or revert them, or add them to .gitignore.\n' >&2
+  else
+    say "tree:      clean — nothing this run created is reported by git status"
+  fi
+}
+
 # ------------------------------------------------- which home this clones FROM
 #
 # Issue #50. The source and the close-out destination must be THE SAME HOME BY
@@ -679,6 +819,11 @@ export SKILL_MANAGER_HOME="$STORE"
 if [ "$bootstrapped" = 1 ] && [ "$frozen_skip" = 0 ]; then
   ensure_cli_pin
 fi
+
+# Before the emptiness gate, not after it: exit 5 is a refusal about what the
+# home HOLDS, and the home directories already exist by then. A run that refused
+# and left the tree dirty would hand the operator two problems.
+ensure_run_artifacts_ignored
 
 # ------------------------------------------------------- the home has to HOLD something
 #

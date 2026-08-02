@@ -946,6 +946,87 @@ check "$(yesno test -z "$UNKNOWN")" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
 
+# -------------------------------- onboarding leaves the working tree CLEAN
+#
+# Measured: after a documented bootstrap + install, `git status --porcelain`
+# read `?? .claude.json`, and the next documented step — `wt new`, which asserts
+# a clean tree — refused with `working tree is not clean`. Onboarding a repo
+# made it unusable by the next step of onboarding it. `/.claude/` does not match
+# `/.claude.json`, and the documented rule list had four entries.
+#
+# The property under test is the general one, not "`.claude.json` is ignored":
+# after the bootstrap, nothing the home machinery put at the root is reported by
+# git status, whatever it is called — and the operator's own untracked work is
+# still reported, because a bootstrap that silenced `git status` wholesale would
+# pass this and be far worse.
+
+step "A bootstrapped checkout is still clean, and still shows the operator's own work"
+
+CLEANP="$SCRATCH/cleanproj"
+mkdir -p "$CLEANP"
+git -C "$CLEANP" init -q -b main
+git -C "$CLEANP" config user.email selftest@example.invalid
+git -C "$CLEANP" config user.name "selftest"
+# EXACTLY the four documented rules, and no fifth. The omission is the subject
+# of the defect, so the fixture must not pre-fix it — a `.gitignore` copied from
+# a working setup would make this whole section assert nothing.
+printf '/.skill-manager/\n/.claude/\n/.codex/\n/.gemini/\n' > "$CLEANP/.gitignore"
+printf 'x\n' > "$CLEANP/README.md"
+git -C "$CLEANP" add -A
+git -C "$CLEANP" -c commit.gpgsign=false commit -qm "fixture"
+check "$(yesno test "$(command grep -c . "$CLEANP/.gitignore")" = 4)" \
+  "the_clean_tree_fixture_carries_only_the_four_documented_ignore_rules" \
+  "the fixture .gitignore has $(command grep -c . "$CLEANP/.gitignore") rules; a fifth would pre-fix the defect"
+
+# No seeded home here, deliberately: this fixture is a repo being onboarded, so
+# the bootstrap has to CLONE (from the decoy global home `bare` points HOME at).
+# Seeding one would make the run refuse with "exists and is not empty" and every
+# assertion below would be about a bootstrap that never happened.
+
+# The artefact, planted at the root the way `install`/`sync` writes it, BEFORE
+# the bootstrap — that is the ordinary case, since the documented order is
+# bootstrap, then install. Its own non-vacuity: it must be reported as untracked
+# by the four documented rules, or "it is ignored afterwards" proves nothing.
+printf '{"mcpServers":{"virtual-mcp-gateway":{"type":"http","url":"http://127.0.0.1:0/mcp"}}}\n' \
+  > "$CLEANP/.claude.json"
+printf 'the operator was in the middle of something\n' > "$CLEANP/NOTES.md"
+git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-before.txt"
+check "$(yesno command grep -q '^?? \.claude\.json$' "$SCRATCH/clean-before.txt")" \
+  "the_four_documented_rules_really_do_leave_claude_json_untracked" \
+  "the fixture's .claude.json is already ignored, so the next check would pass for the wrong reason:
+$(command sed 's/^/        /' "$SCRATCH/clean-before.txt")"
+
+CLEAN_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$CLEANP" \
+  > "$SCRATCH/clean.log" 2>&1 || CLEAN_RC=$?
+check "$(yesno test "$CLEAN_RC" = 0)" \
+  "the_clean_tree_fixture_bootstrapped" \
+  "bootstrap exited $CLEAN_RC; the cleanliness checks would be about a run that did nothing. See $SCRATCH/clean.log"
+
+git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-after.txt"
+check "$(yesno absent_pattern '\.claude\.json' "$SCRATCH/clean-after.txt")" \
+  "nothing_the_home_machinery_put_at_the_root_is_left_dirty" \
+  "still reported by git status after the bootstrap:
+$(command sed 's/^/        /' "$SCRATCH/clean-after.txt")"
+
+# The other half, and it is the one that makes the check worth having: a
+# bootstrap that ignored everything would satisfy the assertion above.
+check "$(yesno command grep -q 'NOTES.md' "$SCRATCH/clean-after.txt")" \
+  "the_operators_own_untracked_work_is_still_reported" \
+  "the bootstrap silenced a file it did not create — git status no longer names NOTES.md"
+
+# And the consequence, end to end, because "clean" is only interesting as the
+# precondition of the next command.
+git -C "$CLEANP" add NOTES.md
+git -C "$CLEANP" -c commit.gpgsign=false commit -qm "the operator's work"
+WTNEW_RC=0
+( cd "$CLEANP" && bare bash "$SCRIPT_DIR/wt" new C1 ) \
+  > "$SCRATCH/clean-wtnew.out" 2> "$SCRATCH/clean-wtnew.err" || WTNEW_RC=$?
+check "$(yesno test "$WTNEW_RC" = 0)" \
+  "wt_new_is_not_refused_by_a_tree_the_bootstrap_left_behind" \
+  "wt new exited $WTNEW_RC after a clean bootstrap:
+$(command sed 's/^/        /' "$SCRATCH/clean-wtnew.out")"
+
 # ------------------------------- a refusal with nowhere to go names a command
 #
 # The one path a genuinely fresh machine takes: no `~/.skill-manager` at all.

@@ -595,13 +595,35 @@ Add to the **parent root** `.gitignore` — never to a file inside a constituent
 ```gitignore
 /.skill-manager/
 /.claude/
+/.claude.json
 /.codex/
 /.gemini/
 constituents/*/.skill-manager/
 constituents/*/.claude/
+constituents/*/.claude.json
 constituents/*/.codex/
 constituents/*/.gemini/
 ```
+
+`/.claude.json` is not covered by `/.claude/` and is a separate file: `install`
+and `sync` write claude's MCP registration to `<root>/.claude.json`, beside the
+agent directory rather than inside it. Without the rule, an onboarded repo has
+`?? .claude.json` in `git status` and the very next step — `wt new`, which
+asserts a clean tree — refuses it. (That the file is written *there at all* is a
+skill-manager defect: every launcher sets `CLAUDE_CONFIG_DIR=<root>/.claude`,
+and claude reads `$CLAUDE_CONFIG_DIR/.claude.json`. The rule above is correct
+either way, and `bootstrap-home.sh` does not depend on this list — see below.)
+
+**`bootstrap-home.sh` also does this for you, locally.** It lists the untracked
+top-level entries before and after its work and writes an exclude rule for
+anything it created, plus anything untracked whose name the home machinery owns
+(`.claude*`, `.codex*`, `.gemini*`, `.skill-manager*`, read from the home's
+descriptor, not from a list in the script). Those rules go in
+`$GIT_COMMON_DIR/info/exclude`, which is per-clone and appears in no diff —
+appending to the tracked `.gitignore` would make the tree dirty in a different
+way and `wt new` would refuse it just the same. The rules above are still worth
+committing: they are the shared, portable statement of the same thing, and they
+mean a fresh clone is clean before anyone runs a bootstrap.
 
 Then **prove it**, because a constituent's own `.gitignore` is more specific
 than the root's and a negated rule in it wins:
