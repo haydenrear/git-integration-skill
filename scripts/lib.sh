@@ -9,6 +9,58 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*" >&2; }
 step() { printf '\n== %s ==\n' "$*" >&2; }
 
+# ----------------------------------------------------------------- the contract
+#
+# Prose goes to stderr (everything above). THE CONTRACT GOES TO STDOUT, and
+# stdout carries nothing else.
+#
+# That split is the whole point. An agent handed a ticket has to create a
+# worktree, and today it must read CLAUDE.md, INTEGRATION.md,
+# references/skill-homes.md, references/worktrees.md and git-issue-workflow's
+# provision.md before it can do so safely. The observed failure mode is that it
+# does not: it gives up and writes its own script, which knows none of the rules
+# those pages exist to state. The fix is not more documentation, it is an output
+# an agent can act on without any — so the successful run answers exactly the
+# questions it has next, one per line, keyword first, value runnable:
+#
+#   WORKTREE   where to edit
+#   BRANCH     what was branched, from what
+#   LAUNCH     the command that starts an agent bound to this worktree's home
+#   IF-EXIT-8  the command that clears the first-launch drift gate
+#   CLOSE      the command that tears it down through the gate
+#   PROPAGATE  (integration repos only) the fan-out
+#
+# and the failing run answers the only two it has then:
+#
+#   FAILED     one line, what went wrong
+#   FIX        one runnable command
+#
+# The KEYS are the interface, not this file. git-issue-skill#4 asks whether this
+# primitive should move to `git-issue` or into `skill-manager` itself; a caller
+# that reads these keys keeps working across that move, and a caller that parses
+# the prose does not. So: never add a key without adding it to `references/worktrees.md`,
+# and never make a key's value anything but a path or a command that runs.
+contract() { printf '%-10s %s\n' "$1" "$2"; }
+
+# The failure half. Both lines, always: a FAILED with no FIX is the banner this
+# replaces, and a FIX with no FAILED is a command with no reason to run it.
+contract_fail() {
+  local fix="$1"; shift
+  contract FAILED "$*"
+  contract FIX    "$fix"
+}
+
+# die(), plus the contract, plus a chosen exit code. The prose still goes to
+# stderr — it is where the reasoning lives, and the reasoning is why these
+# scripts refuse at all — but a caller that reads only stdout gets the two lines
+# it can act on.
+die_fix() {
+  local code="$1" fix="$2"; shift 2
+  contract_fail "$fix" "$*"
+  printf 'error: %s\n' "$*" >&2
+  exit "$code"
+}
+
 # Two questions that look like one. Conflating them is how new-change.sh came
 # to build a worktree of the wrong repository, silently and with exit 0:
 #
@@ -198,6 +250,6 @@ assert_parent_clean() {
   local root="$1"
   if [ -n "$(git -C "$root" status --porcelain)" ]; then
     git -C "$root" status --short >&2
-    die "working tree is not clean: $root (see above)"
+    die_fix 1 "git -C $root status --short" "working tree is not clean: $root (commit or revert the files listed above)"
   fi
 }

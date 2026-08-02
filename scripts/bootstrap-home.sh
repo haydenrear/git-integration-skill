@@ -41,6 +41,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
                          [--print-env] [--force] [--quiet]
+                         [--onboard [--onboard-gateway]] [--allow-empty]
 
   --root DIR       Checkout to give a home to. Default: the nearest enclosing
                    git toplevel — which inside a constituent is the
@@ -59,10 +60,29 @@ usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
                    to a frozen one, and never re-clones over an existing
                    store.
   --quiet          Only report failures.
+  --onboard        When the finished home has NO skills, run
+                   `skill-manager onboard --skip-gateway` on it instead of
+                   refusing. Only legal for a MAIN working tree: onboarding a
+                   WORKTREE home would give it units its project home never had,
+                   and every one of those blocks teardown (issue #50).
+  --onboard-gateway  With --onboard, also start the gateway. Off by default
+                   because the gateway is a contended singleton
+                   (skill-manager#132) and a bootstrap is not the place to
+                   contend for it.
+  --allow-empty    Accept a home with zero skills. Downgrades the refusal to a
+                   warning; the home is still reported as EMPTY, never as
+                   verified.
+
+Exit codes: 0 ok - 1 usage/setup error - 5 the home has no skills
 EOF
 }
 
+# A home with zero skills is a distinct outcome from a broken one, and callers
+# (new-change.sh, `wt`) route it to a different remedy, so it gets its own code.
+EMPTY_EXIT=5
+
 ROOT=""; SOURCE=""; POLICY="live"; PRINT_ENV=0; FORCE=0; QUIET=0
+ONBOARD=0; ONBOARD_GATEWAY=0; ALLOW_EMPTY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root)      ROOT="${2:?--root needs a directory}"; shift 2 ;;
@@ -71,6 +91,9 @@ while [ $# -gt 0 ]; do
     --print-env) PRINT_ENV=1; shift ;;
     --force)     FORCE=1; shift ;;
     --quiet)     QUIET=1; shift ;;
+    --onboard)   ONBOARD=1; shift ;;
+    --onboard-gateway) ONBOARD=1; ONBOARD_GATEWAY=1; shift ;;
+    --allow-empty) ALLOW_EMPTY=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage; die "unknown argument: $1" ;;
   esac
@@ -271,6 +294,63 @@ for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME"):
     if value:
         print(value)
 '
+}
+
+# The agent-home env as `NAME=VALUE` words, ready to hand to `env`. Any command
+# that writes agent bindings — `sync` above all — must run with these set, or it
+# writes the OPERATOR'S ~/.claude.json, ~/.codex/config.toml and
+# ~/.gemini/settings.json instead of this home's. Measured: `SKILL_MANAGER_HOME=<home>
+# skill-manager sync --force-scripts`, the remedy this script used to print
+# verbatim, reported `ADDED claude (~/.claude.json)` — the global-binding hijack
+# recorded as skill-manager#145, printed as an instruction by THIS file. Naming
+# the home is not enough; the agent-home variables are a separate axis.
+agent_env_words() {
+  local dir
+  descriptor_env_dirs | while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    case "$dir" in
+      */.claude) printf 'CLAUDE_CONFIG_DIR=%s\n' "$dir" ;;
+      */.codex)  printf 'CODEX_HOME=%s\n' "$dir" ;;
+      */.gemini) printf 'GEMINI_HOME=%s\n' "$dir" ;;
+    esac
+  done
+}
+
+# A shell-quoted `env ...` prefix that pins BOTH axes. This is the only spelling
+# of a home-mutating command this script is allowed to print.
+home_env_prefix() {
+  local out="env SKILL_MANAGER_HOME=$STORE" word
+  while IFS= read -r word; do [ -n "$word" ] && out="$out ${word%%=*}=${word#*=}"; done <<EOF
+$(agent_env_words)
+EOF
+  printf '%s\n' "$out"
+}
+
+# How many skills this home can actually serve. Directories only, and only ones
+# carrying a SKILL.md, so a stray file or an empty leftover directory cannot
+# make an empty home look populated — which is the whole point of the count.
+home_skill_count() { skill_count "$STORE"; }
+skill_count() {
+  local d n=0
+  for d in "$1"/skills/*/; do
+    [ -d "$d" ] || continue
+    [ -f "$d/SKILL.md" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+# Symlinks inside the home that do not resolve. `home clone` skips venvs/,
+# tools/, npm/ and cache/ by design, so any link INTO one of them arrives
+# dangling — and `skill-manager home verify` refuses the home for exactly this,
+# which is how bootstrap came to report `verified` on a home `home verify`
+# rejects. Found here with `find` rather than with a second CLI start: it is the
+# same fact, it costs no JVM, and it is still answerable on the --force path
+# where no clone report exists.
+dangling_home_links() {
+  command find "$STORE/bin" -type l 2>/dev/null | while IFS= read -r link; do
+    [ -e "$link" ] || printf '%s -> %s\n' "${link#"$STORE"/}" "$(readlink "$link")"
+  done
 }
 
 # ------------------------------------------------------------- the CLI pin
@@ -491,8 +571,16 @@ if [ "$bootstrapped" = 0 ]; then
   fi
 
   # 1. Clone. The only step that names the source, and it only reads it.
+  #
+  # `>&2` because `home clone`'s report is diagnostics, and THIS SCRIPT'S STDOUT
+  # IS RESERVED. It carries the FAILED/FIX contract, and `--print-env` output
+  # meant to be `eval`ed; a caller that captures it must get those bytes and
+  # nothing else. Without the redirect the clone's ten-line report was prepended
+  # to the contract `wt new` prints — measured, and exactly the "25 lines of
+  # prose" this work exists to remove. Every other CLI call here is already
+  # captured or sent to /dev/null; this was the one that was not.
   if [ "$need_clone" = 1 ]; then
-    "$CLI" home clone --from "$SOURCE" --to "$STORE" \
+    "$CLI" home clone --from "$SOURCE" --to "$STORE" >&2 \
       || die "home clone failed; $STORE is not usable"
     cloned=1
   fi
@@ -544,6 +632,101 @@ export SKILL_MANAGER_HOME="$STORE"
 # everywhere else.
 if [ "$bootstrapped" = 1 ] && [ "$frozen_skip" = 0 ]; then
   ensure_cli_pin
+fi
+
+# ------------------------------------------------------- the home has to HOLD something
+#
+# git-integration-skill#10. A home cloned from an unpopulated source is a
+# perfectly well-formed home with nothing in it: the descriptor is right, the
+# policy is right, the shims resolve, `exec --print-env` is happy — and an agent
+# launched against it has ZERO skills. Every check this script had was about the
+# home's WIRING, so all of them passed, the banner said `verified`, and the last
+# thing the operator read was "Launch an agent bound to this home". The one
+# command that would have fixed it, `skill-manager onboard`, was named nowhere.
+#
+# Two decisions, made deliberately rather than by default:
+#
+# 1. REFUSE AND NAME, do not run. `onboard` clones bundled skills from github and
+#    touches the gateway; a bootstrap that silently did that would make the
+#    cheapest, most-repeated command in this repo the most expensive and the most
+#    contended (skill-manager#132). --onboard opts in.
+#
+# 2. Only when skills/ came up EMPTY. A home with skills is not this script's
+#    business — deciding it needs MORE of them is the operator's call, and
+#    running `onboard` on every bootstrap would re-install into every worktree.
+#
+# And onboarding a WORKTREE home is refused outright even with --onboard. The
+# worktree home is a COPY of the project home and close-change.sh reconciles it
+# back into that same home (#50); installing three units here that the project
+# home never had makes each of them a teardown blocker before any work exists.
+# The empty home is the PROJECT's problem, so the remedy names the project.
+SKILLS_N="$(home_skill_count)"
+
+if [ "$SKILLS_N" = 0 ] && [ "$ONBOARD" = 1 ] && [ "$frozen_skip" = 0 ]; then
+  if [ "$IS_WORKTREE" = 1 ]; then
+    say "onboard:   refused for a worktree home — see the refusal below"
+  else
+    require_local_home "onboard"
+    heading "Installing the bundled skills (--onboard)"
+    ONBOARD_ARGS=""
+    [ "$ONBOARD_GATEWAY" = 1 ] || ONBOARD_ARGS="--skip-gateway"
+    # Through the agent-home env, not a bare SKILL_MANAGER_HOME: `onboard` ends
+    # in the same projection/binding write `sync` does, and with the agent-home
+    # variables unset that write lands in the operator's ~/.claude.json.
+    # shellcheck disable=SC2046
+    env $(agent_env_words) SKILL_MANAGER_HOME="$STORE" "$CLI" onboard $ONBOARD_ARGS >&2 \
+      || die "\`onboard\` failed on $STORE. The home is wired but empty; nothing was
+  installed. Re-run the command by hand to see why:
+    $(home_env_prefix) $CLI onboard $ONBOARD_ARGS"
+    SKILLS_N="$(home_skill_count)"
+  fi
+fi
+
+if [ "$SKILLS_N" = 0 ] && [ "$frozen_skip" = 0 ]; then
+  if [ "$ALLOW_EMPTY" = 1 ]; then
+    say "skills:    0 (--allow-empty) — an agent launched against this home has NO skills"
+  elif [ "$IS_WORKTREE" = 1 ]; then
+    printf 'error: this home has no skills, so an agent launched against it has none.\n' >&2
+    printf '  home:    %s\n' "$STORE" >&2
+    printf '  source:  %s  (its project home — a worktree home is a copy of it)\n' "$SOURCE" >&2
+    # Which of the two it is decides the remedy, so it is measured rather than
+    # assumed: an empty SOURCE is the ordinary #10 case and the fix is at the
+    # project, while a populated source that produced an empty copy is a clone
+    # defect and pointing the operator at `onboard` would send them to install
+    # units the project already has.
+    if [ "$(skill_count "$SOURCE")" != 0 ]; then
+      cat >&2 <<EOF
+The source home has $(skill_count "$SOURCE") skill(s) and this copy has none, so the CLONE dropped
+them — installing here would not be a repair, it would hide one. Compare the two
+and re-clone:
+  ls '$SOURCE/skills' '$STORE/skills'
+  rm -rf '$STORE' && $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT'
+EOF
+      exit "$EMPTY_EXIT"
+    fi
+    cat >&2 <<EOF
+Install into the PROJECT home, not this one: units installed here are units the
+project home never had, and close-change.sh blocks on every one of them at
+teardown (issue #50). Two commands, in this order:
+  $SCRIPT_DIR/bootstrap-home.sh --root '$(dirname "$PROJECT_HOME")' --onboard
+  $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT' --force
+Or accept an empty home deliberately with --allow-empty.
+EOF
+    exit "$EMPTY_EXIT"
+  else
+    printf 'error: this home has no skills, so an agent launched against it has none.\n' >&2
+    printf '  home:    %s\n' "$STORE" >&2
+    printf '  source:  %s  (%s — it is empty too)\n' "$SOURCE" "$SOURCE_ORIGIN" >&2
+    cat >&2 <<EOF
+The step that installs the bundled skills is \`onboard\`, and cloning a home
+never runs it. Run it here:
+  $(home_env_prefix) $CLI onboard --skip-gateway
+or let this script do it:
+  $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT' --force --onboard
+Or accept an empty home deliberately with --allow-empty.
+EOF
+    exit "$EMPTY_EXIT"
+  fi
 fi
 
 # --------------------------------------------------------------- assertions
@@ -629,12 +812,47 @@ verify() {
     printf '    your shell PATH until skill-manager prunes it too.\n' >&2
   fi
 
+  # Can this home SERVE a skill? Every check above is about wiring, and wiring
+  # is exactly what an empty home gets right (#10). Repeated here rather than
+  # left to the gate above so that verify() is not itself the fail-open: the
+  # gate can be waved through with --allow-empty, and this function is what the
+  # word "verified" is printed on the strength of.
+  local skills; skills="$(home_skill_count)"
+  if [ "$skills" = 0 ] && [ "$ALLOW_EMPTY" != 1 ]; then
+    die "verify: $STORE/skills holds no skill with a SKILL.md, so this home cannot
+  serve one. Install the bundled skills:
+    $(home_env_prefix) $CLI onboard --skip-gateway"
+  fi
+
+  # Advisory, and the reason bootstrap used to disagree with `skill-manager home
+  # verify`: that command REFUSES a home holding an unresolvable reference, and
+  # a clone always produces some, because it skips venvs/, tools/, npm/ and
+  # cache/ by design. Reported rather than fatal because the remedy `home verify`
+  # prints is NOT a fixpoint — see the closing note — so refusing here would make
+  # every honest bootstrap fail on a defect this repo cannot fix.
+  local dangling; dangling="$(dangling_home_links)"
+  if [ -n "$dangling" ] && [ "$QUIET" != 1 ]; then
+    printf '  WARNING: link(s) in this home do not resolve, so the tools they name\n' >&2
+    printf '           fail at exec time and `skill-manager home verify` REFUSES this\n' >&2
+    printf '           home until they do:\n' >&2
+    # One printf per line, never `printf fmt $(cmd)`: a target with a space in it
+    # would be split into two bogus lines by the shell before printf ever saw it.
+    while IFS= read -r entry; do
+      [ -n "$entry" ] && printf '             %s\n' "$entry" >&2
+    done <<EOF
+$dangling
+EOF
+    printf '           See the closing note: `sync --force-scripts` re-provisions\n' >&2
+    printf '           script shims but does not recreate <home>/venvs.\n' >&2
+  fi
+
   [ "$QUIET" = 1 ] || {
     info "home:      $STORE"
     info "policy:    $policy"
     info "descriptor:$descriptor"
     info "shims:     $STORE/bin/launch (claude, codex, gemini)"
-    info "verified:  descriptor env inside $ROOT; claude/codex resolve to this home's shims"
+    info "skills:    $skills"
+    info "verified:  $skills skill(s) servable; descriptor env inside $ROOT; claude/codex resolve to this home's shims"
   }
 }
 
@@ -650,6 +868,17 @@ if [ "$PRINT_ENV" = 1 ]; then
   exit 0
 fi
 
+# Reachable with zero skills only via --allow-empty (the gate above exits
+# otherwise) or on a frozen home, and in both cases the invitation to launch has
+# to carry the caveat rather than stand alone. "Verified, now launch an agent" on
+# a home with no skills is the half of #10 that is a defect under every option.
+[ "$QUIET" = 1 ] || [ "$SKILLS_N" != 0 ] || cat >&2 <<EOF
+
+This home has NO SKILLS. An agent launched against it has none of them; that is
+not a working home, it is an empty one. Install the bundled skills first:
+  $(home_env_prefix) $CLI onboard --skip-gateway
+EOF
+
 [ "$QUIET" = 1 ] || cat >&2 <<EOF
 
 Launch an agent bound to this home:
@@ -660,10 +889,42 @@ EOF
 
 # Only after a clone actually ran: the caveat is about what just happened, so it
 # is gated on `cloned`, not on `bootstrapped`. See the note beside `cloned=0`.
+#
+# Two things about the sentence below were wrong, and both were printed as
+# instructions:
+#
+#   * `SKILL_MANAGER_HOME=<home> skill-manager sync --force-scripts` names ONE of
+#     the two axes. With CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_HOME unset, the
+#     binding step of that sync writes the OPERATOR'S ~/.claude.json,
+#     ~/.codex/config.toml and ~/.gemini/settings.json — measured: `ADDED claude
+#     (~/.claude.json) -> http://127.0.0.1:<port>/mcp`. That is the global-binding
+#     hijack of skill-manager#145, reached by copy-pasting a line this file
+#     printed. `home_env_prefix` pins both axes; re-measured with it, the same
+#     sync wrote only <root>/.claude.json.
+#
+#   * it is not a fixpoint, and the claim that it re-provisions the reported
+#     links is false for the links that actually get reported. Measured:
+#     `home verify` rc=1 on `bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2`
+#     -> run this remedy (rc=1, but it completes its sync) -> `home verify` rc=1
+#     again, identical message, and <home>/venvs is still empty. Nothing in
+#     `sync` recreates a venv the clone deliberately skipped, so a home whose
+#     tools live in one can never pass `home verify` by following the instruction
+#     `home verify` itself prints. That belongs to skill-manager, not here; this
+#     file's job is to stop asserting a repair it cannot make.
 [ "$QUIET" = 1 ] || [ "$cloned" = 0 ] || cat >&2 <<EOF
 
 The home is a clone: cache/, tmp/, logs/, venvs/, tools/ and npm/ were not
-copied. Any CLI shim whose target lived under one of those is reported by the
-clone above and is re-provisioned with:
-  SKILL_MANAGER_HOME=$STORE $CLI sync --force-scripts
+copied, so a shim whose target lived under one of those arrived dangling. Any
+such link is listed above.
+
+Run THIS spelling, not the one \`home clone\` printed above: that one sets
+SKILL_MANAGER_HOME alone, and a sync with the agent-home variables unset writes
+the OPERATOR'S ~/.claude.json, ~/.codex/config.toml and ~/.gemini/settings.json
+(skill-manager#145).
+  $(home_env_prefix) $CLI sync --force-scripts
+re-provisions the shims it can re-derive. It does NOT recreate <home>/venvs, so
+a link INTO venvs/ stays dangling and \`skill-manager home verify\` keeps
+refusing this home — running its printed remedy does not change its verdict.
+That is a skill-manager gap, not something to keep re-running here; only the
+tools those links name are affected.
 EOF

@@ -64,15 +64,22 @@ usage: new-change.sh <TICKET> [base-branch] [--integration] [--no-home]
                   constituent you are standing in.
   --no-home       Skip the per-worktree Skill Manager home. Agents launched in
                   the worktree then use the operator's global home.
+  --quiet         Suppress the explanatory prose on stderr. The contract on
+                  stdout is unaffected — it is what `wt` shows.
   -h, --help      This message.
+
+Stdout is the contract and nothing else: WORKTREE / BRANCH / LAUNCH / IF-EXIT-8
+/ CLOSE (/ PROPAGATE) on success, FAILED / FIX on failure. `wt new <TICKET>` is
+the same thing with the prose already suppressed.
 EOF
 }
 
-TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0
+TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0; QUIET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-home)     SKIP_HOME=1; shift ;;
     --integration) WANT_INTEGRATION=1; shift ;;
+    --quiet)       QUIET=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     -*)            usage; die "unknown option: $1" ;;
     *)             if [ -z "$TICKET" ]; then TICKET="$1"; elif [ -z "$BASE" ]; then BASE="$1";
@@ -80,6 +87,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TICKET" ] || { usage; die "a ticket id is required"; }
+
+# --quiet silences the narration, never the refusals: `die`, `die_fix` and the
+# contract are untouched below. The prose is an explanation of a correct run and
+# `wt` does not want it; a refusal is the run's whole result.
+if [ "$QUIET" = 1 ]; then info() { :; }; step() { :; }; fi
 
 # ------------------------------------------------------- which repo, out loud
 
@@ -120,7 +132,12 @@ assert_parent_clean "$ROOT"
 BRANCH="feature/$TICKET"
 WT="$(ticket_worktree_path "$ROOT" "$TICKET")"
 assert_worktree_outside_integration "$WT"
-[ -e "$WT" ] && die "worktree path already exists: $WT"
+# The recovery for this used to be named nowhere, which is how an operator who
+# hit it reached for `rm -rf` or a bare `git worktree remove` — both of which
+# skip the close-out gate and delete the home silently. It is one command, so it
+# is the FIX.
+[ -e "$WT" ] && die_fix 1 "$SCRIPT_DIR/wt close $TICKET" \
+  "a worktree for $TICKET already exists at $WT"
 
 : "${BASE:=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD)}"
 
@@ -144,7 +161,9 @@ if [ "$SKIP_HOME" = 1 ]; then
   info "home:      skipped (--no-home) — agents launched here will use the global home"
 else
   step "Giving the worktree its own Skill Manager home"
-  if ! "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT"; then
+  HOME_RC=0
+  "$SCRIPT_DIR/bootstrap-home.sh" --root "$WT" || HOME_RC=$?
+  if [ "$HOME_RC" != 0 ]; then
     # ROLL THE WORKTREE BACK. Leaving it was the wrong half of a two-step
     # operation: the worktree and the branch survived, `new-change.sh <TICKET>`
     # then refused with "worktree path already exists", and the recovery
@@ -162,6 +181,26 @@ else
       git -C "$ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true
       rolled_back=1
     fi
+    # Exit 5 is bootstrap-home.sh's "the home has no skills" (#10). Distinct
+    # remedy, and the generic one below is actively wrong for it: re-running the
+    # bootstrap against the PROJECT does not install anything, so the operator
+    # would loop. The fix is `--onboard` against the project, because a worktree
+    # home is a copy of the project home and onboarding the copy instead makes it
+    # unclosable (#50).
+    if [ "$HOME_RC" = 5 ]; then
+      contract_fail "$SCRIPT_DIR/bootstrap-home.sh --root $ROOT --onboard" \
+        "the project home $ROOT/.skill-manager holds no skills, so this worktree's copy would hold none either"
+      cat >&2 <<EOF
+
+The worktree's home was created but holds NO SKILLS, because the project home it
+is copied from holds none either. Install into the PROJECT home, then re-run:
+
+  $SCRIPT_DIR/bootstrap-home.sh --root "$ROOT" --onboard
+  $0 $TICKET${BASE:+ $BASE}
+EOF
+    else
+    contract_fail "$SCRIPT_DIR/bootstrap-home.sh --root $ROOT" \
+      "no Skill Manager home could be created for this worktree (usually: $ROOT has no project home yet)"
     cat >&2 <<EOF
 
 No home could be created for this worktree, so an agent started in it would
@@ -172,6 +211,7 @@ project home yet, which one command fixes:
   $SCRIPT_DIR/bootstrap-home.sh --root "$ROOT"
   $0 $TICKET${BASE:+ $BASE}
 EOF
+    fi
     if [ "$rolled_back" = 1 ]; then
       cat >&2 <<EOF
 
@@ -193,6 +233,37 @@ EOF
     exit 3
   fi
 fi
+
+# ------------------------------------------------------------------ the contract
+#
+# STDOUT, and nothing else on it. These are the facts an agent needs to take its
+# next step, and they are emitted HERE rather than assembled by `wt` afterwards
+# because this script is the only thing that authoritatively knows them: $WT came
+# from `ticket_worktree_path`, which is the same function close-change.sh
+# resolves the ticket with, and $ROOT/$KIND came from the resolution this script
+# already printed. A front door that re-derived them would be a second opinion
+# about which worktree belongs to which repo, and issue #50 is what a second
+# opinion about that costs.
+if [ "$SKIP_HOME" = 1 ]; then
+  # Honest rather than uniform: with no home there is nothing to launch bound to,
+  # and printing a LAUNCH line naming a shim that does not exist would be the
+  # same class of defect as `verified` over an empty home.
+  contract WORKTREE  "$WT"
+  contract BRANCH    "$BRANCH (from $BASE, $KIND repo $(basename "$ROOT"))"
+  contract LAUNCH    "none — created with --no-home; an agent here uses the operator's GLOBAL home"
+  contract CLOSE     "$SCRIPT_DIR/wt close $TICKET"
+else
+  contract WORKTREE  "$WT"
+  contract BRANCH    "$BRANCH (from $BASE, $KIND repo $(basename "$ROOT"))"
+  contract LAUNCH    "$WT/.skill-manager/bin/launch/claude"
+  # The first launch from a fresh home is REFUSED with exit 8 until the change to
+  # its units has been read. That is not an error, it is the drift gate, and an
+  # agent that meets it without this line goes looking for a reference page —
+  # which is the cost this contract exists to remove.
+  contract IF-EXIT-8 "$WT/.skill-manager/bin/cli/skill-manager home drift --ack"
+  contract CLOSE     "$SCRIPT_DIR/wt close $TICKET"
+fi
+[ "$KIND" != integration ] || contract PROPAGATE "$SCRIPT_DIR/propagate.sh $TICKET"
 
 # ----------------------------------------------------------------- next steps
 

@@ -163,6 +163,18 @@ git -C "$PROJ" add -A
 git -C "$PROJ" -c commit.gpgsign=false commit -qm "fixture"
 seed_home "$PROJ_HOME" "project-only-unit"
 
+# A CLI shim whose target lives under a directory `home clone` deliberately
+# SKIPS (venvs/, tools/, npm/, cache/). Every real home on this machine has one
+# — `bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2` is the measured case —
+# and the copy therefore arrives with a link that does not resolve. That is what
+# `skill-manager home verify` refuses a home for, and bootstrap-home.sh used to
+# print `verified` beside it without a word. Seeded here so the fixture has the
+# property the real homes have.
+mkdir -p "$PROJ_HOME/bin/cli" "$PROJ_HOME/venvs/jinja2-cli/bin"
+printf '#!/bin/sh\nexit 0\n' > "$PROJ_HOME/venvs/jinja2-cli/bin/jinja2"
+chmod +x "$PROJ_HOME/venvs/jinja2-cli/bin/jinja2"
+ln -s ../../venvs/jinja2-cli/bin/jinja2 "$PROJ_HOME/bin/cli/jinja2"
+
 # Every child runs the way an operator does: no SKILL_MANAGER_HOME, HOME
 # pointing at the decoy so the "global home" fallback is the decoy, and
 # user.home overridden because the JVM on macOS derives it from the OS and
@@ -220,6 +232,121 @@ check "$(yesno command grep -q 'not re-cloning' "$SCRATCH/bootstrap-force.log")"
 check "$(yesno exists "$WT_HOME/skills/project-only-unit")" \
   "a_force_rerun_leaves_the_existing_home_intact" \
   "$WT_HOME/skills/project-only-unit vanished across --force (rc=$FORCE_RC)"
+
+# --------------------------------- 1b. what the banner claims about the home
+#
+# git-integration-skill#10 and the two findings beside it. Everything above is
+# about WHERE the home came from; these are about what the run then SAYS about
+# it, which is the half that fails open.
+
+step "The banner describes the home it actually produced (#10)"
+
+# The count is stated, and it is the count. A `verified:` line that names no
+# number is how "verified" came to be printed over a home with nothing in it.
+VERIFIED_LINE="$(command grep -m1 '^  verified:' "$SCRATCH/bootstrap.log" || true)"
+check "$(yesno contains "1 skill(s) servable" "$VERIFIED_LINE")" \
+  "the_verified_line_states_how_many_skills_the_home_can_serve" \
+  "expected the servable-skill count in '${VERIFIED_LINE:-<no verified: line>}'"
+
+# The dangling shim the fixture seeded. `skill-manager home verify` refuses this
+# home for it; bootstrap must at minimum SAY so, or the two disagree and the
+# operator believes the one that ran.
+#
+# Asserted against the --force log, NOT the clone log. On the clone path `home
+# clone` prints the same link itself, so a check reading that log passes whether
+# or not bootstrap says anything — measured while writing this, by reverting the
+# report and watching the check stay green. --force runs no clone, so the only
+# thing that can name the link there is bootstrap's own verify().
+check "$(yesno command grep -q 'bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2' "$SCRATCH/bootstrap-force.log")" \
+  "a_link_that_does_not_resolve_in_the_home_is_named_even_with_no_clone_report" \
+  "verify() did not name the dangling shim on a run that printed no clone report (rc=$FORCE_RC); see $SCRATCH/bootstrap-force.log"
+
+# The remedy the caveat prints is a command an operator copy-pastes, and run as
+# it used to be spelled — SKILL_MANAGER_HOME alone — its binding step writes the
+# OPERATOR'S ~/.claude.json. Measured: `ADDED claude (~/.claude.json)`. That is
+# skill-manager#145 reached through a string printed here, so the agent-home
+# variables are asserted on the same line as the command.
+#
+# Scoped to the caveat THIS SCRIPT writes — the tail of the log from `The home
+# is a clone` onward — because `home clone` prints the unsafe spelling itself,
+# higher up, and that string belongs to skill-manager. Measured while writing
+# this check: the CLI's own line reads
+#   re-provision with `SKILL_MANAGER_HOME=<home> skill-manager sync --force-scripts`
+# which is the hijack verbatim. This repo cannot fix that line, so the caveat now
+# contradicts it in words and the assertion is made where the fix lives.
+CAVEAT="$(command sed -n '/The home is a clone/,$p' "$SCRATCH/bootstrap.log" || true)"
+SYNC_LINE="$(printf '%s\n' "$CAVEAT" | command grep -m1 'sync --force-scripts' || true)"
+check "$(yesno test -n "$SYNC_LINE")" \
+  "the_clone_caveat_still_prints_a_sync_command_to_check" \
+  "no 'sync --force-scripts' line in the caveat at all, so the next check would prove nothing"
+check "$(yesno contains "CLAUDE_CONFIG_DIR=$WT" "$SYNC_LINE")" \
+  "a_printed_sync_command_pins_the_agent_home_env_too" \
+  "'$SYNC_LINE' names the home but not CLAUDE_CONFIG_DIR — run from a bare shell it
+      writes the operator's ~/.claude.json (skill-manager#145)"
+check "$(yesno contains "not the one" "$CAVEAT")" \
+  "the_caveat_warns_off_the_unsafe_spelling_the_cli_printed_above_it" \
+  "the CLI's own SKILL_MANAGER_HOME-only remedy is left standing as the last word"
+
+# And it must not claim a repair it cannot make. Measured: `home verify` rc=1 ->
+# run this exact remedy -> `home verify` rc=1, same message, <home>/venvs still
+# empty. Nothing in `sync` recreates a venv the clone skipped.
+check "$(yesno command grep -q 'does NOT recreate <home>/venvs' "$SCRATCH/bootstrap.log")" \
+  "the_caveat_does_not_claim_the_sync_repairs_links_into_venvs" \
+  "the caveat still presents sync --force-scripts as the fix for a dangling venv link; it is not a fixpoint"
+
+# ------------------------------------------- 1c. a home with nothing in it (#10)
+
+step "A home with no skills is refused, not reported as verified"
+
+# The source is a WELL-FORMED home that holds nothing: installed/ + skills/,
+# which is what LaunchEnv.looksLikeStoreRoot asks for, and zero units. Cloning it
+# produces a home whose descriptor, policy, shims and `exec --print-env` are all
+# correct — so every check bootstrap-home.sh had passed, it printed `verified`,
+# and its last line invited the operator to launch an agent that would have no
+# skills at all. `skill-manager onboard` is the step that installs the bundled
+# ones, and it was named nowhere.
+EMPTYP="$SCRATCH/emptyproj"
+mkdir -p "$EMPTYP"
+git -C "$EMPTYP" init -q -b main
+git -C "$EMPTYP" config user.email selftest@example.invalid
+git -C "$EMPTYP" config user.name "selftest"
+printf 'x\n' > "$EMPTYP/README.md"
+git -C "$EMPTYP" add -A
+git -C "$EMPTYP" -c commit.gpgsign=false commit -qm "fixture"
+mkdir -p "$EMPTYP/.skill-manager/installed" "$EMPTYP/.skill-manager/skills"
+EMPTY_WT="$SCRATCH/emptyproj-T7"
+git -C "$EMPTYP" worktree add -q -b feature/T7 "$EMPTY_WT" main
+
+EMPTY_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$EMPTY_WT" \
+  > "$SCRATCH/empty.log" 2>&1 || EMPTY_RC=$?
+
+# Non-vacuity, and it is not optional here: a bootstrap that refused for some
+# EARLIER reason — no source, a disagreeing source, no capable CLI — would also
+# be non-zero and would also never print `verified`, and every check below would
+# pass while proving nothing about emptiness. The clone must have HAPPENED.
+check "$(yesno exists "$EMPTY_WT/.skill-manager/home.runtime.json")" \
+  "the_empty_home_fixture_really_did_produce_a_wired_home" \
+  "no descriptor at $EMPTY_WT/.skill-manager/home.runtime.json — the run failed before the emptiness could be the reason (rc=$EMPTY_RC)"
+
+check "$(yesno test "$EMPTY_RC" = 5)" \
+  "a_home_with_no_skills_exits_with_the_empty_home_code" \
+  "expected exit 5, got $EMPTY_RC; see $SCRATCH/empty.log"
+check "$(yesno absent_pattern '^  verified:' "$SCRATCH/empty.log")" \
+  "a_home_with_no_skills_is_never_reported_as_verified" \
+  "'verified:' was printed over a home holding zero skills; see $SCRATCH/empty.log"
+check "$(yesno absent_pattern 'Launch an agent bound to this home' "$SCRATCH/empty.log")" \
+  "a_home_with_no_skills_does_not_close_by_inviting_a_launch" \
+  "the run ended by telling the operator to launch an agent against an empty home"
+check "$(yesno command grep -q 'onboard' "$SCRATCH/empty.log")" \
+  "the_refusal_names_onboard_the_step_that_installs_the_bundled_skills" \
+  "the one command that fixes this is never mentioned; see $SCRATCH/empty.log"
+# And it must send the operator to the PROJECT home. Onboarding the worktree's
+# own copy would give it units the project home never had, every one of them a
+# close-out blocker before any work exists (#50).
+check "$(yesno command grep -q -- "--root '$EMPTYP' --onboard" "$SCRATCH/empty.log")" \
+  "the_refusal_points_onboard_at_the_project_home_not_the_worktree_copy" \
+  "the remedy does not name $EMPTYP; onboarding the worktree copy makes it unclosable (#50)"
 
 # --------------------------------------------- 2. where close-out reconciles to
 
@@ -406,6 +533,130 @@ check "$(yesno absent_pattern 'feature/T9' "$SCRATCH/branches.txt")" \
 check "$(yesno contains "bootstrap-home.sh --root \"$NOHOME\"" "$(cat "$SCRATCH/newchange.log")")" \
   "the_failure_names_a_remedy_that_actually_works" \
   "the trailing remedy does not name the PROJECT root; see $SCRATCH/newchange.log"
+
+# --------------------------------- 5b. the cheap path: `wt`, and its contract
+#
+# The output an agent acts on. `new-change.sh` closing banner was ~25 lines of
+# prose and conditional remedies, and the measured consequence was not that
+# agents read it slowly — it is that they stopped calling these scripts at all
+# and wrote their own worktree provisioning, which knows none of the rules the
+# prose exists to state.
+#
+# So the assertions here are about STDOUT and only stdout: the keys are the
+# interface (git-issue-skill#4 — this primitive may later move to `git-issue` or
+# into skill-manager, and a caller reading keys survives that move), every value
+# has to be a path or a command that runs, and a refusal has to answer with a
+# command rather than with a paragraph.
+
+step "wt: the output is the next move"
+
+CHEAP="$SCRATCH/cheap"
+mkdir -p "$CHEAP"
+git -C "$CHEAP" init -q -b main
+git -C "$CHEAP" config user.email selftest@example.invalid
+git -C "$CHEAP" config user.name "selftest"
+printf '.skill-manager/\n.claude/\n.codex/\n.gemini/\n.claude.json\n' > "$CHEAP/.gitignore"
+printf 'fixture\n' > "$CHEAP/README.md"
+git -C "$CHEAP" add -A
+git -C "$CHEAP" -c commit.gpgsign=false commit -qm "fixture"
+seed_home "$CHEAP/.skill-manager" "cheap-project-unit"
+
+NEW_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W1 ) \
+  > "$SCRATCH/wt-new.out" 2> "$SCRATCH/wt-new.err" || NEW_RC=$?
+
+# Non-vacuity before anything else: a run that failed would have an empty or
+# two-line stdout, and "no prose on stdout" would be trivially true of it.
+check "$(yesno test "$NEW_RC" = 0)" \
+  "wt_new_creates_the_worktree_and_its_home_in_one_command" \
+  "wt new exited $NEW_RC; see $SCRATCH/wt-new.err"
+
+# Every line of stdout is a contract line. This is the assertion that the ~25
+# lines of prose are gone rather than merely reordered — the clone report alone
+# was ten lines, and it reached stdout until `home clone` was redirected.
+UNKEYED=""
+CONTRACT_LINES=0
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  CONTRACT_LINES=$((CONTRACT_LINES + 1))
+  case "$line" in
+    WORKTREE*|BRANCH*|LAUNCH*|IF-EXIT-8*|CLOSE*|PROPAGATE*) : ;;
+    *) UNKEYED="${UNKEYED}      $line"$'\n' ;;
+  esac
+done < "$SCRATCH/wt-new.out"
+
+check "$(yesno test -z "$UNKEYED")" \
+  "wt_new_puts_nothing_but_the_contract_on_stdout" \
+  "these lines are on stdout and are not contract lines:
+$UNKEYED"
+check "$(yesno test "$CONTRACT_LINES" -ge 4)" \
+  "the_contract_has_the_lines_the_next_checks_read" \
+  "only $CONTRACT_LINES contract line(s); the per-key checks below would prove nothing"
+
+WT_LINE_V="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+LAUNCH_V="$(command sed -n 's/^LAUNCH  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+CLOSE_V="$(command sed -n 's/^CLOSE  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+DRIFT_V="$(command sed -n 's/^IF-EXIT-8  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+
+check "$(yesno test -d "$WT_LINE_V")" \
+  "the_contract_names_a_worktree_that_exists" \
+  "WORKTREE names '${WT_LINE_V:-<none>}', which is not a directory"
+
+# "leaves it launchable" is the requirement, so the LAUNCH value is checked as a
+# file that can be executed, not merely as a string that was printed.
+check "$(yesno executable "$LAUNCH_V")" \
+  "the_contract_names_a_launcher_that_exists_and_can_be_run" \
+  "LAUNCH names '${LAUNCH_V:-<none>}', which is not an executable file"
+check "$(yesno contains "$WT_LINE_V/" "$LAUNCH_V")" \
+  "the_launcher_is_this_worktrees_own_not_some_other_homes" \
+  "LAUNCH '$LAUNCH_V' is not inside $WT_LINE_V — an agent started with it would bind to another home"
+
+check "$(yesno executable "${CLOSE_V%% *}")" \
+  "the_contract_names_a_close_command_that_exists" \
+  "CLOSE names '${CLOSE_V:-<none>}', whose first token is not an executable file"
+check "$(yesno executable "${DRIFT_V%% *}")" \
+  "the_contract_names_a_runnable_way_out_of_the_first_launch_refusal" \
+  "IF-EXIT-8 names '${DRIFT_V:-<none>}', whose first token is not an executable file — an agent
+      that meets exit 8 without it goes back to the reference pages"
+
+# The failing half, and it must be equally tight. Re-running `new` on an
+# existing worktree used to die with "worktree path already exists" and name the
+# recovery nowhere, which is how an operator reaches for `rm -rf` and skips the
+# close-out gate entirely.
+DUP_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W1 ) \
+  > "$SCRATCH/wt-dup.out" 2> "$SCRATCH/wt-dup.err" || DUP_RC=$?
+check "$(yesno test "$DUP_RC" != 0)" \
+  "a_second_wt_new_for_the_same_ticket_fails" \
+  "it exited 0, so the checks below would be asserting against a success"
+DUP_FAILED="$(command sed -n 's/^FAILED  *//p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+DUP_FIX="$(command sed -n 's/^FIX  *//p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+check "$(yesno test -n "$DUP_FAILED")" \
+  "a_failing_run_says_what_failed_in_one_line" \
+  "no FAILED line on stdout; see $SCRATCH/wt-dup.out"
+check "$(yesno executable "${DUP_FIX%% *}")" \
+  "a_failing_run_names_one_remedy_that_is_actually_runnable" \
+  "FIX names '${DUP_FIX:-<none>}', whose first token is not an executable file"
+check "$(yesno contains "close W1" "$DUP_FIX")" \
+  "the_remedy_for_an_existing_worktree_is_the_gated_teardown" \
+  "FIX is '$DUP_FIX' — anything but a 'wt close' here routes the operator around the close-out gate"
+
+# And the closing half of the pair. The old trailing note printed the literal
+# string `<branch>`, so the one fact still owed after a teardown was the one the
+# operator had to go and look up.
+CLOSE_RC2=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W1 ) \
+  > "$SCRATCH/wt-close.out" 2> "$SCRATCH/wt-close.err" || CLOSE_RC2=$?
+check "$(yesno test "$CLOSE_RC2" = 0)" \
+  "wt_close_tears_the_worktree_down_in_one_command" \
+  "wt close exited $CLOSE_RC2; see $SCRATCH/wt-close.err"
+check "$(yesno absent "$WT_LINE_V")" \
+  "wt_close_actually_removed_it" \
+  "$WT_LINE_V is still there after a close that reported success"
+DELETE_V="$(command sed -n 's/^DELETE  *//p' "$SCRATCH/wt-close.out" | command sed -n 1p)"
+check "$(yesno contains "feature/W1" "$DELETE_V")" \
+  "the_closing_contract_names_the_branch_it_left_behind" \
+  "DELETE is '${DELETE_V:-<none>}' — the branch outlives the worktree, so naming it is the whole remaining move"
 
 # ------------------------- 6. the gate does not make its own CLI exec itself
 

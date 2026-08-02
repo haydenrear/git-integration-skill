@@ -139,6 +139,13 @@ fi
 
 STORE="$WT/.skill-manager"
 
+# Read BEFORE the removal, because after it there is no worktree to ask. The
+# branch outlives the worktree deliberately (the change may not have landed yet),
+# so "which branch is now dangling" is a fact the closing contract owes the
+# caller — and `<branch>` as a literal placeholder, which is what the old
+# trailing note printed, is not that fact.
+WT_BRANCH="$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+
 # The destination is the PROJECT home — the main working tree's — and it is
 # derived from the same lib.sh function bootstrap-home.sh clones the worktree
 # home from. That is issue #50: the two used to answer separately, bootstrap
@@ -283,8 +290,17 @@ CLI="$(pick_cli || true)"
 
 # --------------------------------------------------------------- the verdict
 
+# The one command that clears the refusal about to be printed. Set by the caller
+# when it knows something better than "discard it all", which is the only
+# universally-true answer and the worst one to lead with. Read by refuse().
+REFUSE_FIX=""
+
 # refuse <reason...> — stop, unless the operator asked to discard.
 refuse() {
+  # The contract first, on stdout: FIRST argument as the one-line summary, since
+  # the remaining ones are the explanation and an agent acting on stdout alone
+  # needs the headline and a command, not a paragraph.
+  contract_fail "${REFUSE_FIX:-$0 $TARGET --force}" "$1"
   printf '\n' >&2
   printf 'refusing to remove %s\n' "$WT" >&2
   printf '  %s\n' "$@" >&2
@@ -301,17 +317,25 @@ EOF
 }
 
 gate_ran=0
+# Did the gate ESTABLISH that nothing would be lost? Distinct from "the script is
+# still running": --force lets a refusal continue, and a --dry-run that then
+# reported CLEAN would be reporting the opposite of what happened.
+gate_clean=0
 if [ ! -d "$STORE" ]; then
   # The one case where absence really is proof: no home, no home-resident work.
   info "gate:      skipped — no home in this worktree, so it holds no unit work"
-  gate_ran=1
+  gate_ran=1; gate_clean=1
 elif [ -z "$CLI" ]; then
+  # The home's OWN pin is the candidate this script prefers, and re-provisioning
+  # it is one command — so the fix is to repair the home, not to discard it.
+  REFUSE_FIX="$SCRIPT_DIR/bootstrap-home.sh --root $WT --force"
   refuse "no skill-manager with a \`home close-out\` subcommand was found," \
          "so whether this worktree still holds work could not be established." \
          "  looked at: \$SKILL_MANAGER_CLI, $STORE/bin/cli/skill-manager," \
          "             a skill-manager shipped by this checkout, then PATH." \
          "  Set SKILL_MANAGER_CLI to a build that has it and re-run."
 elif [ ! -d "$INTO" ]; then
+  REFUSE_FIX="$SCRIPT_DIR/bootstrap-home.sh --root $(dirname "$INTO")"
   refuse "the project home $INTO does not exist, so the worktree's work has" \
          "nowhere to go and the gate has nothing to check against." \
          "  Create it (scripts/agent-home.sh) or pass --into <home>."
@@ -342,6 +366,9 @@ else
       --home "$STORE" --into "$INTO" --json 2>/dev/null)" && rc=0 || rc=$?
 
   if [ -z "$VERDICT" ]; then
+    # Re-running the gate by hand is the fix, because the reason it said nothing
+    # is on its stderr, which --json swallowed.
+    REFUSE_FIX="$CLI home close-out --home $STORE --into $INTO"
     refuse "\`home close-out\` produced no verdict (exit $rc), so nothing was established."
   else
     # Render blockers from the JSON rather than re-deriving them: the CLI owns
@@ -353,7 +380,14 @@ else
     # regex over someone else's sentence, and it corrupted the one thing a
     # remedy tail carries — the conflicted-file list, where `skill-manager.toml`
     # matched the token and became a path in another repository.
-    printf '%s' "$VERDICT" | "$PY" -c '
+    # Captured, then printed, so the FIX line can name the FIRST blocker's own
+    # remedy. `--force` is the only fix that is always true and the worst one to
+    # lead with — it is the one that throws the work away — so the contract names
+    # the command that clears the blocker instead, and leaves --force to the
+    # prose. Rendered once and reused, never rendered twice: the remedy string
+    # belongs to HomeCloseOut and a second render is a second chance to differ
+    # from it.
+    RENDERED="$(printf '%s' "$VERDICT" | "$PY" -c '
 import json, sys
 
 try:
@@ -372,9 +406,12 @@ for b in v.get("blockers", []):
     for c in b.get("conflicts", []):
         print("      conflict  %s" % c)
     print("      run: %s" % b["remedy"])
-' >&2
+')"
+    printf '%s\n' "$RENDERED" >&2
 
     if [ "$rc" != 0 ]; then
+      FIRST_REMEDY="$(printf '%s\n' "$RENDERED" | command sed -n 's/^      run: //p' | command sed -n 1p)"
+      REFUSE_FIX="${FIRST_REMEDY:-$0 $TARGET --force}"
       # Only reachable with --force; refuse() exits otherwise. Do NOT fall
       # through to the "clean" line below — saying "clean" one line after
       # "DISCARDED" is how a forced teardown gets remembered as a safe one.
@@ -383,6 +420,7 @@ for b in v.get("blockers", []):
       info "gate:      OVERRIDDEN — the work listed above is being discarded"
     else
       info "gate:      clean — $STORE holds nothing that removing it would destroy"
+      gate_clean=1
     fi
   fi
   gate_ran=1
@@ -395,6 +433,10 @@ fi
 if [ "$DRY_RUN" = 1 ]; then
   step "Dry run — nothing removed"
   info "would run: git -C \"$ROOT\" worktree remove \"$WT\""
+  if [ "$gate_clean" = 1 ]; then
+    contract CLEAN "$WT — the gate found nothing that removing it would destroy"
+    contract CLOSE "$SCRIPT_DIR/wt close $TARGET"
+  fi
   exit 0
 fi
 
@@ -408,8 +450,8 @@ fi
 # gesture the one that was blocked while the destructive one was still a cd
 # away.
 case "$INVOKED_FROM/" in
-  "$WT"/*) die "refusing to remove $WT while you are standing in it
-  cd elsewhere (e.g. $ROOT) and re-run, or use --dry-run to just ask." ;;
+  "$WT"/*) die_fix 1 "bash -c \"cd '$ROOT' && '$SCRIPT_DIR/wt' close '$TARGET'\"" \
+    "refusing to remove $WT while you are standing in it — cd elsewhere and re-run, or use --dry-run to just ask" ;;
 esac
 
 step "Removing the worktree"
@@ -421,8 +463,17 @@ if ! git -C "$ROOT" worktree remove --force "$WT"; then
 fi
 info "removed:   $WT (and its home)"
 
+# The contract, on stdout. The branch outlives the worktree on purpose, so the
+# only thing still owed is what it is called and how to delete it — and it is
+# named, not left as the literal `<branch>` the old trailing note printed.
+contract CLOSED "$WT"
+if [ -n "$WT_BRANCH" ]; then
+  contract BRANCH "$WT_BRANCH (still here — the change may not have landed yet)"
+  contract DELETE "git -C $ROOT branch -d $WT_BRANCH"
+fi
+
 cat >&2 <<EOF
 
 The branch is still here. Delete it when the change has landed:
-  git -C "$ROOT" branch -d <branch>
+  git -C "$ROOT" branch -d ${WT_BRANCH:-<branch>}
 EOF
