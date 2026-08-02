@@ -17,12 +17,13 @@
 # reverse — putting a PARENT-only concern inside a constituent — which is not
 # what these are.
 #
-# These rules ARE the mechanism, not a convenience: bootstrap-home.sh writes no
-# ignore rule anywhere and refuses (exit 7) a checkout whose .gitignore does not
-# cover what a home leaves at its root. `/.claude.json` is here because
-# `/.claude/` does not match it and because skill-manager builds before 0.20.0
-# wrote claude's MCP registration beside the agent directory rather than inside
-# it; 0.20.0 writes `.claude/.claude.json`, which `/.claude/` already covers.
+# These are NOT the mechanism. bootstrap-home.sh keeps a checkout clean by
+# writing a MEASURED, per-checkout rule into .git/info/exclude, which requires no
+# commit to the repo being onboarded. These rules exist for everyone ELSE who
+# clones this repo, because that exclude rule is invisible to them.
+# `.claude.json` is listed because `.claude/` does not match it and skill-manager
+# builds before 0.20.0 wrote claude's MCP registration beside the agent directory
+# rather than inside it; 0.20.0 writes `.claude/.claude.json`, already covered.
 .skill-manager/
 .claude/
 .claude.json
