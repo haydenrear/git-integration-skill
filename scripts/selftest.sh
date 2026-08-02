@@ -50,14 +50,26 @@ done
 # else to look, and PATH on this machine is the released build with no `home`
 # subcommand at all. Refuse loudly rather than "skip": a skipped check reports
 # the same green as a passing one.
+#
+# The resolution order is bootstrap-home.sh's, exactly and only:
+#   $SKILL_MANAGER_CLI  ->  command -v skill-manager  ->  refuse.
+#
+# It used to have a third rung — `$SCRIPT_DIR/../../skill-manager/skill-manager`
+# and one level above that — and a path relative to THIS FILE is not a fact about
+# which build should run, it is a fact about where this file happens to be
+# sitting. Measured: run from a worktree checked out beside the integration repo
+# rather than inside `constituents/`, those two entries resolved to an unrelated
+# April clone with no `home clone` subcommand at all, and the whole suite then
+# failed for reasons that had nothing to do with what it was asserting. A
+# relative rung cannot be told apart from the right answer by anything the
+# script can check, so there is no rung. `assert_no_relative_cli_resolution`
+# below keeps it that way for every script in this directory.
 CLI="${SKILL_MANAGER_CLI:-}"
-if [ -z "$CLI" ]; then
-  for c in "$SCRIPT_DIR/../../skill-manager/skill-manager" \
-           "$SCRIPT_DIR/../../../skill-manager/skill-manager"; do
-    [ -f "$c" ] && [ -x "$c" ] && { CLI="$(cd "$(dirname "$c")" && pwd -P)/$(basename "$c")"; break; }
-  done
-fi
-[ -n "$CLI" ] || die "no skill-manager CLI. Set SKILL_MANAGER_CLI to a build with \`home clone\`."
+[ -n "$CLI" ] || CLI="$(command -v skill-manager || true)"
+[ -n "$CLI" ] || die "no skill-manager CLI. Set SKILL_MANAGER_CLI to a build with \`home clone\`,
+  or put one on PATH. There is deliberately no fallback to a path relative to
+  this script: on this machine that resolved to a stale clone and the suite
+  failed for reasons unrelated to what it asserts."
 "$CLI" home clone --help 2>&1 | command grep -q -- '--to' \
   || die "SKILL_MANAGER_CLI ($CLI) has no \`home clone\` subcommand"
 
@@ -857,6 +869,89 @@ check "$(yesno test -z "$UNKNOWN")" \
   "every_skill_manager_option_this_repo_prints_is_accepted_by_the_cli" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
+
+# -------------------------------- no script resolves a CLI by a relative path
+#
+# The rule, for every script in this directory: a skill-manager is
+# $SKILL_MANAGER_CLI, then whatever `command -v skill-manager` answers, then
+# nothing. A path relative to the script's own location is not evidence about
+# which build should run — it is evidence about where the checkout happens to be
+# — and when the two disagree the script runs a build nobody chose. Measured on
+# selftest.sh itself: from a worktree beside the integration repo,
+# `$SCRIPT_DIR/../../skill-manager/skill-manager` named an unrelated April clone
+# with no `home clone`, and the suite failed for reasons it is not about.
+#
+# bootstrap-home.sh's pick_cli is the deliberate exception and is NOT relative:
+# its extra candidates are anchored on `$ROOT` (the checkout being bootstrapped)
+# and on `outermost_integration_root "$ROOT"`, both derived from the target, not
+# from where this file sits.
+
+step "No script resolves a skill-manager by a path relative to itself"
+
+# The pattern, and then proof the pattern still matches the shape it is for.
+# A grep assertion that finds nothing reports the same green whether the defect
+# is absent or the pattern is a typo, and this one is a regex over punctuation,
+# which is the shape that rots. So the control is written to disk in the exact
+# spelling that shipped, and the check that it MATCHES runs first.
+REL_CLI_RE='\.\.(/\.\.)*/skill-manager/skill-manager'
+CONTROL="$SCRATCH/rel-cli-control.txt"
+# The control carries the two lines VERBATIM as they shipped, each behind a `#`
+# so that this file's own copy of them is not itself a resolution site. The
+# static sweep below drops comment lines for the same reason — a comment cannot
+# run a CLI — and the count here is taken WITHOUT that filter, so the pattern is
+# proved live against the real spelling before any filtering happens.
+cat > "$CONTROL" <<'EOF'
+#  for c in "$SCRIPT_DIR/../../skill-manager/skill-manager" \
+#           "$SCRIPT_DIR/../../../skill-manager/skill-manager"; do
+EOF
+CONTROL_HITS="$(command grep -cE "$REL_CLI_RE" "$CONTROL" || true)"
+check "$(yesno test "$CONTROL_HITS" -ge 2)" \
+  "the_relative_cli_pattern_still_matches_the_spelling_that_shipped" \
+  "the pattern matched $CONTROL_HITS of the 2 control lines, so a zero count over
+      scripts/ would prove nothing"
+
+REL_HITS="$(cd "$SCRIPT_DIR" && command grep -rnE "$REL_CLI_RE" . 2>/dev/null \
+  | command grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+  | command grep -v 'REL_CLI_RE=' || true)"
+check "$(yesno test -z "$REL_HITS")" \
+  "no_script_here_resolves_a_skill_manager_by_a_path_relative_to_itself" \
+  "these resolve a CLI from their own location:
+$(printf '%s\n' "$REL_HITS" | command sed 's/^/        /')"
+
+# The dynamic half. The static check can only see the spelling it knows; this one
+# plants the file the old code reached for, at exactly the path it reached for it
+# from, and asserts the refusal happens WITHOUT it being touched. Its own
+# non-vacuity is the decoy's existence: if the plant is wrong the "never invoked"
+# half is true for the wrong reason, so the plant is asserted first.
+REL_ROOT="$SCRATCH/relcheck"
+REL_SCRIPTS="$REL_ROOT/skill/scripts"
+mkdir -p "$REL_SCRIPTS" "$REL_ROOT/skill-manager"
+cp "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt" "$SCRIPT_DIR/_manifest.py" "$REL_SCRIPTS/" 2>/dev/null || true
+DECOY="$REL_ROOT/skill-manager/skill-manager"
+DECOY_LOG="$REL_ROOT/decoy.log"
+cat > "$DECOY" <<EOF
+#!/usr/bin/env bash
+printf 'INVOKED %s\n' "\$*" >> "$DECOY_LOG"
+exit 99
+EOF
+chmod +x "$DECOY"
+check "$(yesno executable "$DECOY")" \
+  "the_stale_clone_decoy_sits_at_the_path_the_old_fallback_reached_for" \
+  "$DECOY is not an executable file, so 'it was never invoked' would prove nothing"
+
+REL_RC=0
+run_bounded 40 env -u SKILL_MANAGER_CLI PATH=/usr/bin:/bin \
+  bash "$REL_SCRIPTS/selftest.sh" > "$REL_ROOT/child.log" 2>&1 || REL_RC=$?
+check "$(yesno test "$REL_RC" != 0)" \
+  "a_suite_with_no_pin_and_no_skill_manager_on_PATH_refuses" \
+  "it exited 0 with nothing to run against (rc=$REL_RC); see $REL_ROOT/child.log"
+check "$(yesno absent "$DECOY_LOG")" \
+  "the_refusal_did_not_reach_for_the_clone_beside_the_checkout" \
+  "the decoy was invoked: $(cat "$DECOY_LOG" 2>/dev/null | command tr '\n' ' ')"
+check "$(yesno command grep -q 'no skill-manager CLI' "$REL_ROOT/child.log")" \
+  "the_refusal_names_the_variable_that_fixes_it" \
+  "expected the SKILL_MANAGER_CLI refusal; got:
+$(command sed 's/^/        /' "$REL_ROOT/child.log" 2>/dev/null | command tail -5)"
 
 # ------------------------------------------------------------------- verdict
 
