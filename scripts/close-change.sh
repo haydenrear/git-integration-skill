@@ -297,6 +297,27 @@ REFUSE_FIX=""
 
 # refuse <reason...> — stop, unless the operator asked to discard.
 refuse() {
+  # THE CONTRACT KEY SETS ARE EXCLUSIVE. `wt --help` states "either, on failure
+  # FAILED / FIX", and a run that goes on to remove the worktree and print
+  # CLOSED / BRANCH / DELETE is not a failure — it is a success the operator
+  # asked for. Measured: `wt close ACME-2 --force` exited 0 having printed
+  # FAILED and FIX and then CLOSED, BRANCH and DELETE, so a caller parsing
+  # stdout saw a failure on a run that succeeded, and a caller that keys on
+  # FAILED first saw the opposite of what happened.
+  #
+  # So on the forced path the refusal is EXPLANATION, not verdict, and
+  # explanation lives on stderr like all the other prose here. It is not
+  # quieter: the same lines are printed, plus the DISCARDED banner. What
+  # changes is which stream carries the answer.
+  if [ "$FORCE" = 1 ]; then
+    printf '\n' >&2
+    printf 'the gate refused to remove %s\n' "$WT" >&2
+    printf '  %s\n' "$@" >&2
+    printf '\n  Clearing it would have been:\n    %s\n' \
+      "${REFUSE_FIX:-$0 $TARGET --force}" >&2
+    printf '\n  --force given: removing anyway. Anything above is DISCARDED.\n' >&2
+    return 0
+  fi
   # The contract first, on stdout: FIRST argument as the one-line summary, since
   # the remaining ones are the explanation and an agent acting on stdout alone
   # needs the headline and a command, not a paragraph.
@@ -304,10 +325,6 @@ refuse() {
   printf '\n' >&2
   printf 'refusing to remove %s\n' "$WT" >&2
   printf '  %s\n' "$@" >&2
-  if [ "$FORCE" = 1 ]; then
-    printf '\n  --force given: removing anyway. Anything above is DISCARDED.\n' >&2
-    return 0
-  fi
   cat >&2 <<EOF
 
   Clear the blockers above, or discard them deliberately:

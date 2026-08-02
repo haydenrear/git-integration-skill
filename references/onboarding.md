@@ -47,7 +47,9 @@ git add -A && git commit -m "scaffold compositions + markers"
 #      - add the /.skill-manager/ + constituents/*/.skill-manager/ ignore rules
 #        to the ROOT .gitignore, and prove them with `git check-ignore -v`
 #      - write skill-project.toml declaring the units this repo's agents need
-#      - copy scripts/agent-home.sh into the repo root, run it once
+#      - cp $S/agent-home.sh scripts/   (the locator this skill ships), then
+#        `scripts/agent-home.sh` from the repo root is the same thing as the
+#        line below and needs to know nothing about where the skill lives
 $S/bootstrap-home.sh --root .
 ```
 

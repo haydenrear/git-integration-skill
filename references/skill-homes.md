@@ -22,9 +22,12 @@ One script does this, for both the repo root and every worktree:
 <this-skill>/scripts/bootstrap-home.sh --root <checkout>
 ```
 
-A repo that has been onboarded also carries a two-line locator,
-`scripts/agent-home.sh`, so a person or agent in the checkout does not have to
-know where the skill lives.
+A repo that has been onboarded also carries a locator, `scripts/agent-home.sh`,
+so a person or agent in the checkout does not have to know where the skill
+lives. **This skill ships that file**: copy `<this-skill>/scripts/agent-home.sh`
+into the target repo's own `scripts/` directory. It holds no policy — it finds
+the `bootstrap-home.sh` above and `exec`s it with `--root <repo>`, so a copy of
+it is never a copy of the ordering rules.
 
 ## Where the isolation actually comes from
 
@@ -358,6 +361,45 @@ Two consequences worth stating:
   into the copy are units the project never had — every one of them a teardown
   blocker before any work exists (issue #50).
 
+- **A home full of skills is not a home an agent can read them from.** The store
+  is `<home>/skills/`. *No agent reads it.* An agent reads
+  `<root>/.claude/skills/<unit>` and its `.codex` / `.gemini` siblings, which are
+  symlinks into the store, recorded in `installed/<unit>.projections.json` as
+  `default:<agent>:<unit>` bindings.
+
+  `home clone` copies the **store**. The agent homes live *beside* it, so they
+  are not in the copy — and a freshly cloned worktree home therefore has a full
+  store and three empty agent directories. Measured: `wt new`, exit 0, full
+  contract, `verified: 20 skill(s) servable`, and `ls -a <wt>/.claude` answering
+  `.` and `..`. Every agent launched in that worktree saw **zero** skills.
+  `skill-manager exec` reports it on every launch — one `! reconcile: no
+  skill-manager projection for <u> on <agent> at <path>` line per missing
+  link — and creates nothing.
+
+  `bootstrap-home.sh` now fixes it, and the order it fixes it in matters:
+
+  1. **From the home's own ledger.** `home clone` copies
+     `installed/<unit>.projections.json` *and re-anchors it*, so a fresh
+     worktree home already declares the right destination under the right root.
+     The records are correct; only the symlinks are missing. Materializing them
+     is instant, offline, and touches no unit content.
+  2. **`sync --skip-mcp`, only for what the ledger cannot answer** — a unit with
+     no binding record at all, which is what a scaffolded or hand-seeded home
+     has.
+
+  That order is not a preference. `sync` refreshes unit *content*: measured on a
+  worktree whose home was a correct copy of a complete project home, projecting
+  through `sync` left `skills/<unit>/.git/index` differing from the project
+  home's and `home close-out` then **refused the teardown** — issue #50
+  reintroduced by the fix for this. With the ledger step first the same worktree
+  needs no sync at all and closes cleanly.
+
+  The run then reports `projected: N of M into each of .claude .codex .gemini`,
+  and prints `verified:` **only when N = M**. A home an agent cannot read its
+  skills from exits `6` and names every missing link plus the `sync --skip-mcp`
+  that would create it; `--allow-unprojected` accepts one deliberately (still
+  never as *verified*), and `--no-project` skips the projection step entirely.
+
 ## The first launch is gated on change awareness (exit 8)
 
 A bootstrapped home is not the same thing as a home you can launch from. There
@@ -592,13 +634,35 @@ Add to the **parent root** `.gitignore` — never to a file inside a constituent
 ```gitignore
 /.skill-manager/
 /.claude/
+/.claude.json
 /.codex/
 /.gemini/
 constituents/*/.skill-manager/
 constituents/*/.claude/
+constituents/*/.claude.json
 constituents/*/.codex/
 constituents/*/.gemini/
 ```
+
+`/.claude.json` is not covered by `/.claude/` and is a separate file: `install`
+and `sync` write claude's MCP registration to `<root>/.claude.json`, beside the
+agent directory rather than inside it. Without the rule, an onboarded repo has
+`?? .claude.json` in `git status` and the very next step — `wt new`, which
+asserts a clean tree — refuses it. (That the file is written *there at all* is a
+skill-manager defect: every launcher sets `CLAUDE_CONFIG_DIR=<root>/.claude`,
+and claude reads `$CLAUDE_CONFIG_DIR/.claude.json`. The rule above is correct
+either way, and `bootstrap-home.sh` does not depend on this list — see below.)
+
+**`bootstrap-home.sh` also does this for you, locally.** It lists the untracked
+top-level entries before and after its work and writes an exclude rule for
+anything it created, plus anything untracked whose name the home machinery owns
+(`.claude*`, `.codex*`, `.gemini*`, `.skill-manager*`, read from the home's
+descriptor, not from a list in the script). Those rules go in
+`$GIT_COMMON_DIR/info/exclude`, which is per-clone and appears in no diff —
+appending to the tracked `.gitignore` would make the tree dirty in a different
+way and `wt new` would refuse it just the same. The rules above are still worth
+committing: they are the shared, portable statement of the same thing, and they
+mean a fresh clone is clean before anyone runs a bootstrap.
 
 Then **prove it**, because a constituent's own `.gitignore` is more specific
 than the root's and a negated rule in it wins:
@@ -654,8 +718,11 @@ Two measured consequences worth knowing before you rely on the in-repo copy:
    `git check-ignore -v`.
 3. Write a `skill-project.toml` at the root declaring the units this repo's
    agents need. It is portable intent — the realized state is the home.
-4. Copy `scripts/agent-home.sh` (the locator) into the repo root.
-5. Run `scripts/agent-home.sh` once for the main tree.
+4. Copy this skill's `scripts/agent-home.sh` (the locator) into the repo's own
+   `scripts/` directory: `cp <this-skill>/scripts/agent-home.sh scripts/`.
+5. Run `scripts/agent-home.sh` once for the main tree. (Equivalent, and the
+   spelling to use before the file has been copied:
+   `<this-skill>/scripts/bootstrap-home.sh --root <repo>`.)
 6. From then on, `new-change.sh` gives every worktree its own home. Nothing to
    remember and nothing to **export** — which is a statement about the
    environment, not a promise that the first launch will proceed. Expect the

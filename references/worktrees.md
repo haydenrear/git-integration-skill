@@ -29,6 +29,14 @@ A refusal is two lines — `FAILED` (what) and `FIX` (one command that runs) —
 with the full explanation on stderr. `--verbose` shows that explanation on a
 successful run too.
 
+**The two key sets are exclusive.** A run prints the success keys or the failure
+keys, never both, and the exit code agrees. `wt close <T> --force` is a
+*success*: it prints `CLOSED` / `BRANCH` / `DELETE` and exits 0. The gate's
+refusal — the list of work being discarded — is still printed in full, on
+stderr, and `wt` shows it without `--verbose` for exactly this one case, because
+a teardown that destroys work and says nothing anywhere would be a worse defect
+than the one this rule fixes.
+
 **The keys are the interface, not the path.** git-issue-skill#4 asks whether
 worktree provisioning should live in `git-issue` or in `skill-manager` rather
 than here; a caller that reads these keys keeps working across such a move, and

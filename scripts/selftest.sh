@@ -50,14 +50,26 @@ done
 # else to look, and PATH on this machine is the released build with no `home`
 # subcommand at all. Refuse loudly rather than "skip": a skipped check reports
 # the same green as a passing one.
+#
+# The resolution order is bootstrap-home.sh's, exactly and only:
+#   $SKILL_MANAGER_CLI  ->  command -v skill-manager  ->  refuse.
+#
+# It used to have a third rung — `$SCRIPT_DIR/../../skill-manager/skill-manager`
+# and one level above that — and a path relative to THIS FILE is not a fact about
+# which build should run, it is a fact about where this file happens to be
+# sitting. Measured: run from a worktree checked out beside the integration repo
+# rather than inside `constituents/`, those two entries resolved to an unrelated
+# April clone with no `home clone` subcommand at all, and the whole suite then
+# failed for reasons that had nothing to do with what it was asserting. A
+# relative rung cannot be told apart from the right answer by anything the
+# script can check, so there is no rung. `assert_no_relative_cli_resolution`
+# below keeps it that way for every script in this directory.
 CLI="${SKILL_MANAGER_CLI:-}"
-if [ -z "$CLI" ]; then
-  for c in "$SCRIPT_DIR/../../skill-manager/skill-manager" \
-           "$SCRIPT_DIR/../../../skill-manager/skill-manager"; do
-    [ -f "$c" ] && [ -x "$c" ] && { CLI="$(cd "$(dirname "$c")" && pwd -P)/$(basename "$c")"; break; }
-  done
-fi
-[ -n "$CLI" ] || die "no skill-manager CLI. Set SKILL_MANAGER_CLI to a build with \`home clone\`."
+[ -n "$CLI" ] || CLI="$(command -v skill-manager || true)"
+[ -n "$CLI" ] || die "no skill-manager CLI. Set SKILL_MANAGER_CLI to a build with \`home clone\`,
+  or put one on PATH. There is deliberately no fallback to a path relative to
+  this script: on this machine that resolved to a stale clone and the suite
+  failed for reasons unrelated to what it asserts."
 "$CLI" home clone --help 2>&1 | command grep -q -- '--to' \
   || die "SKILL_MANAGER_CLI ($CLI) has no \`home clone\` subcommand"
 
@@ -73,6 +85,11 @@ exists()    { [ -e "$1" ]; }
 absent_pattern() { ! command grep -q "$1" "$2"; }
 absent_substring() { ! contains "$1" "$2"; }
 absent()    { [ ! -e "$1" ]; }
+# `diff -q` writes "Files … differ" to STDOUT, so a bare `yesno command diff -q`
+# nested inside another substitution captures that sentence along with the
+# verdict and the outer test compares a paragraph to a digit. Measured here.
+same_file()    { command diff -q "$1" "$2" >/dev/null 2>&1; }
+differs_file() { ! same_file "$1" "$2"; }
 executable() { [ -n "${1:-}" ] && [ -f "$1" ] && [ -x "$1" ]; }
 yesno()     { if "$@"; then printf 1; else printf 0; fi; }
 ok()   { PASSED=$((PASSED + 1)); printf '  PASS  %s\n' "$1" >&2; }
@@ -293,6 +310,169 @@ check "$(yesno contains "not the one" "$CAVEAT")" \
 check "$(yesno command grep -q 'does NOT recreate <home>/venvs' "$SCRATCH/bootstrap.log")" \
   "the_caveat_does_not_claim_the_sync_repairs_links_into_venvs" \
   "the caveat still presents sync --force-scripts as the fix for a dangling venv link; it is not a fixpoint"
+
+# ----------------------- 1b2. the skills have to reach an AGENT, not the store
+#
+# The highest-leverage check in this file. `verified: 20 skill(s) servable` was
+# printed over a worktree whose `.claude`, `.codex` and `.gemini` held no
+# `skills/` directory at all — because the count came from `$STORE/skills`, and
+# no agent reads the store. An agent reads `<root>/.<agent>/skills/<unit>`.
+#
+# Everything below therefore asserts on THE LINKS AN AGENT WOULD FOLLOW, and
+# every assertion is shown able to fail by breaking a link three different ways
+# in the same run. A node that recounted the store would stay green through all
+# three, which is exactly how the defect survived.
+
+step "The skills reach an agent, and 'verified' is printed only when they do"
+
+WTP="$SCRATCH/proj-P1"
+git -C "$PROJ" worktree add -q -b feature/P1 "$WTP" main
+WTP_HOME="$WTP/.skill-manager"
+PROJ_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" > "$SCRATCH/proj.log" 2>&1 || PROJ_RC=$?
+
+# The agent directories, read the way the script reads them, so this cannot
+# check a place the launcher does not look.
+AGENT_DIRS=".claude .codex .gemini"
+
+# Non-vacuity first: a store with nothing in it makes "every unit is projected"
+# true over an empty set, which is the exact shape of the bug in mirror image.
+STORE_UNITS=0
+for d in "$WTP_HOME"/skills/*/; do
+  [ -d "$d" ] && [ -f "$d/SKILL.md" ] && STORE_UNITS=$((STORE_UNITS + 1))
+done
+check "$(yesno test "$STORE_UNITS" -ge 1)" \
+  "the_projection_fixture_home_actually_holds_a_skill" \
+  "the home holds $STORE_UNITS skill(s); 'all of them are projected' would be true of nothing"
+check "$(yesno test "$PROJ_RC" = 0)" \
+  "a_bootstrapped_worktree_home_is_accepted" \
+  "bootstrap exited $PROJ_RC; see $SCRATCH/proj.log"
+
+# All three agents, independently and named, so a future agent-specific
+# regression says which one.
+for agent in $AGENT_DIRS; do
+  missing=""
+  for d in "$WTP_HOME"/skills/*/; do
+    [ -d "$d" ] && [ -f "$d/SKILL.md" ] || continue
+    u="$(basename "$d")"
+    dest="$WTP/$agent/skills/$u"
+    # -e, not -L: a dangling symlink is still a directory entry, and a check
+    # that counted entries would accept one.
+    if [ ! -e "$dest" ]; then missing="$missing $u(absent)"; continue; fi
+    real="$(cd "$dest" 2>/dev/null && pwd -P)" || real=""
+    case "$real" in
+      "$WTP"/*) : ;;
+      *) missing="$missing $u(resolves to ${real:-<nothing>})" ;;
+    esac
+  done
+  check "$(yesno test -z "$missing")" \
+    "every_skill_in_the_home_is_readable_by_${agent#.}_from_inside_the_worktree" \
+    "an agent launched here would not see:$missing"
+done
+
+# The banner. Vacuity guard first — if the run had failed earlier there would be
+# no `verified:` line and "it did not claim what it could not do" would be
+# trivially true — then the POSITIVE direction, with the number matching the
+# links that were just counted rather than the store.
+PROJ_SKILLS_LINE="$(command grep -m1 '^  skills:' "$SCRATCH/proj.log" || true)"
+check "$(yesno test -n "$PROJ_SKILLS_LINE")" \
+  "the_projection_run_got_far_enough_to_report_on_the_home" \
+  "no 'skills:' line in $SCRATCH/proj.log — the checks below would be about a run that died first"
+PROJ_VERIFIED="$(command grep -m1 '^  verified:' "$SCRATCH/proj.log" || true)"
+check "$(yesno contains "$STORE_UNITS skill(s) servable" "$PROJ_VERIFIED")" \
+  "a_fully_projected_home_is_reported_as_verified_with_the_projected_count" \
+  "expected '$STORE_UNITS skill(s) servable', got '${PROJ_VERIFIED:-<no verified: line>}'"
+check "$(yesno command grep -q "^  projected: $STORE_UNITS of $STORE_UNITS" "$SCRATCH/proj.log")" \
+  "the_run_states_how_many_of_the_stores_skills_an_agent_can_reach" \
+  "no 'projected: $STORE_UNITS of $STORE_UNITS' line; see $SCRATCH/proj.log"
+
+# --- and now break it, three ways, and require the measurement to notice.
+#
+# `--no-project --allow-unprojected` re-measures WITHOUT repairing: the repair is
+# the other half of the fix and would hide the mutation. Each case re-runs the
+# real measurement code, so what is proved is that the SCRIPT can see it, not
+# that this file can.
+BROKEN_UNIT="$(basename "$(command ls -d "$WTP_HOME"/skills/*/ | command head -1)")"
+remeasure() { # $1 = log name
+  bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" --force \
+    --no-project --allow-unprojected > "$SCRATCH/$1" 2>&1 || true
+}
+
+# `mkdir -p` and `|| true` around every mutation below: when the fix is reverted
+# these directories do not exist AT ALL (that is the defect), and a bare `ln -s`
+# into a missing directory kills the suite under `set -e` before the checks that
+# are about exactly that state can run. Measured while taking the mutation proof.
+mkdir -p "$WTP/.claude/skills"
+
+# (1) the link is simply gone — the case the store count could not see.
+command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
+remeasure "proj-deleted.log"
+check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-deleted.log")" \
+  "deleting_one_agent_link_changes_the_reported_projection_count" \
+  "the count did not move when a link was removed — it is counting the store, not the links:
+$(command grep -m1 '^  projected:' "$SCRATCH/proj-deleted.log" || printf '        <no projected: line>')"
+check "$(yesno absent_pattern '^  verified:' "$SCRATCH/proj-deleted.log")" \
+  "a_home_with_a_missing_agent_link_is_not_reported_as_verified" \
+  "'verified:' was printed over a home an agent cannot read $BROKEN_UNIT from"
+
+# (2) the entry exists and resolves to nothing. A directory listing cannot tell
+#     this from a working link.
+ln -s "$WTP_HOME/skills/no-such-unit-at-all" "$WTP/.claude/skills/$BROKEN_UNIT" || true
+remeasure "proj-dangling.log"
+check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-dangling.log")" \
+  "a_dangling_agent_link_does_not_count_as_a_projection" \
+  "a link to a nonexistent target was counted; see $SCRATCH/proj-dangling.log"
+
+# (3) the entry resolves — into ANOTHER checkout's store. This is the one a
+#     "does it resolve" check misses, and it is a per-checkout isolation failure:
+#     the agent would be reading the project home's copy of the unit.
+command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
+ln -s "$PROJ_HOME/skills/$BROKEN_UNIT" "$WTP/.claude/skills/$BROKEN_UNIT" || true
+remeasure "proj-foreign.log"
+check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-foreign.log")" \
+  "an_agent_link_that_resolves_into_another_checkout_does_not_count" \
+  "a link into $PROJ_HOME was counted as this home serving the unit; see $SCRATCH/proj-foreign.log"
+
+# The refusal, and its code. Without --allow-unprojected the run must not exit 0
+# on a home an agent cannot read, and it must name the exact destination.
+UNPROJ_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" --force --no-project \
+  > "$SCRATCH/proj-refuse.log" 2>&1 || UNPROJ_RC=$?
+check "$(yesno test "$UNPROJ_RC" = 6)" \
+  "an_unservable_home_exits_with_the_unprojected_code" \
+  "expected exit 6, got $UNPROJ_RC; see $SCRATCH/proj-refuse.log"
+check "$(yesno command grep -q "\.claude/skills/$BROKEN_UNIT" "$SCRATCH/proj-refuse.log")" \
+  "the_refusal_names_the_link_an_agent_would_have_followed" \
+  "the refusal does not name $WTP/.claude/skills/$BROKEN_UNIT; see $SCRATCH/proj-refuse.log"
+
+# And the repair, because a check that only proves the script can refuse leaves
+# the operator with a refusal and no way out. This is the whole D1 fix in one
+# line: a plain re-run makes the home servable again.
+command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
+REPAIR_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" --force \
+  > "$SCRATCH/proj-repair.log" 2>&1 || REPAIR_RC=$?
+check "$(yesno test "$REPAIR_RC" = 0)" \
+  "a_plain_rerun_repairs_the_projection" \
+  "bootstrap exited $REPAIR_RC on a home with one missing link; see $SCRATCH/proj-repair.log"
+check "$(yesno exists "$WTP/.claude/skills/$BROKEN_UNIT")" \
+  "the_repaired_link_is_there_and_resolves" \
+  "$WTP/.claude/skills/$BROKEN_UNIT still does not resolve after the repair run"
+check "$(yesno command grep -q '^  verified:' "$SCRATCH/proj-repair.log")" \
+  "the_repaired_home_is_reported_as_verified_again" \
+  "the repair run did not print 'verified:'; see $SCRATCH/proj-repair.log"
+
+# The teardown property, which is what makes the REPAIR MECHANISM the one it is.
+# Projecting through `sync` refreshes unit CONTENT — measured: it left
+# skills/<unit>/.git/index differing from the project home's and `home close-out`
+# then refused the worktree, which is issue #50 reintroduced by the fix for #10.
+# The ledger-first path touches no unit content, so the worktree stays closable.
+( cd "$PROJ" && bare bash "$SCRIPT_DIR/close-change.sh" "$WTP" --dry-run ) \
+  > "$SCRATCH/proj-closeout.log" 2>&1 || true
+check "$(yesno command grep -q 'gate:      clean' "$SCRATCH/proj-closeout.log")" \
+  "projecting_a_worktree_home_does_not_make_it_unclosable" \
+  "the close-out gate refused a worktree whose only change was its own projection:
+$(command grep -E 'BLOCKED|^  [a-z]+ +skill' "$SCRATCH/proj-closeout.log" | command sed 's/^/        /')"
 
 # ------------------------------------------- 1c. a home with nothing in it (#10)
 
@@ -658,6 +838,77 @@ check "$(yesno contains "feature/W1" "$DELETE_V")" \
   "the_closing_contract_names_the_branch_it_left_behind" \
   "DELETE is '${DELETE_V:-<none>}' — the branch outlives the worktree, so naming it is the whole remaining move"
 
+# ------------------------------- 5c. the two contract key sets are EXCLUSIVE
+#
+# `wt --help` states "either, on failure FAILED / FIX". Measured on the pilot:
+# `wt close <T> --force` exited 0 having printed FAILED and FIX and then CLOSED,
+# BRANCH and DELETE. A caller parsing stdout saw a failure on a run that
+# succeeded; a caller that keys on FAILED first saw the opposite of what
+# happened. The forced run is a SUCCESS the operator asked for — the refusal is
+# still printed, in full, on stderr where every other explanation here lives.
+
+step "wt close --force reports one outcome, not both"
+
+FORCED_WT=""
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W2 ) \
+  > "$SCRATCH/wt-new2.out" 2> "$SCRATCH/wt-new2.err" || true
+FORCED_WT="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-new2.out" | command sed -n 1p)"
+
+# Work the gate must block on: a unit the PROJECT home has never seen. Without
+# it the forced path is never reached and the check below measures the clean
+# path twice.
+if [ -n "$FORCED_WT" ] && [ -d "$FORCED_WT/.skill-manager" ]; then
+  seed_home "$FORCED_WT/.skill-manager" "forced-wt-only-unit"
+fi
+
+BLOCK_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W2 ) \
+  > "$SCRATCH/wt-block.out" 2> "$SCRATCH/wt-block.err" || BLOCK_RC=$?
+
+# Anchored on `^KEY` followed by whitespace, always: `CLOSE` is a substring of
+# `CLOSED`, and a substring match here would report the failure key set present
+# on every successful `new`.
+has_key() { command grep -qE "^$1[[:space:]]" "$2"; }
+
+# Non-vacuity, and it is the whole fixture: the forced run below only proves
+# something if the gate really refused first.
+check "$(yesno test "$BLOCK_RC" != 0)" \
+  "the_gate_blocks_the_unforced_close_so_the_forced_one_has_something_to_override" \
+  "wt close exited $BLOCK_RC with a unit only the worktree home holds; see $SCRATCH/wt-block.err"
+check "$(yesno has_key FAILED "$SCRATCH/wt-block.out")" \
+  "a_blocked_close_puts_the_failure_key_set_on_stdout" \
+  "no FAILED line; see $SCRATCH/wt-block.out"
+check "$(yesno test "$(yesno has_key CLOSED "$SCRATCH/wt-block.out")" = 0)" \
+  "a_blocked_close_does_not_also_claim_it_closed" \
+  "CLOSED and FAILED on the same refusing run; see $SCRATCH/wt-block.out"
+
+FORCE_RC2=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W2 --force ) \
+  > "$SCRATCH/wt-force.out" 2> "$SCRATCH/wt-force.err" || FORCE_RC2=$?
+
+check "$(yesno test "$FORCE_RC2" = 0)" \
+  "a_forced_close_succeeds" \
+  "wt close --force exited $FORCE_RC2; see $SCRATCH/wt-force.err"
+check "$(yesno has_key CLOSED "$SCRATCH/wt-force.out")" \
+  "a_forced_close_reports_the_success_key_set" \
+  "no CLOSED line on a run that removed the worktree; see $SCRATCH/wt-force.out"
+check "$(yesno test "$(yesno has_key FAILED "$SCRATCH/wt-force.out")" = 0)" \
+  "a_forced_close_does_not_also_report_the_failure_contract" \
+  "FAILED is on stdout of a run that exited 0 and removed the worktree:
+$(command sed 's/^/        /' "$SCRATCH/wt-force.out")"
+check "$(yesno test "$(yesno has_key FIX "$SCRATCH/wt-force.out")" = 0)" \
+  "a_forced_close_does_not_print_a_fix_for_a_thing_it_did_anyway" \
+  "FIX is on stdout of a successful forced close; see $SCRATCH/wt-force.out"
+
+# The explanation must not have been LOST, only moved. A fix that silenced the
+# refusal instead of re-routing it would satisfy every check above.
+check "$(yesno command grep -q 'DISCARDED' "$SCRATCH/wt-force.err")" \
+  "a_forced_close_still_says_on_stderr_what_it_discarded" \
+  "the forced run threw work away and said so nowhere; see $SCRATCH/wt-force.err"
+check "$(yesno command grep -q 'forced-wt-only-unit' "$SCRATCH/wt-force.err")" \
+  "a_forced_close_names_the_work_it_discarded" \
+  "the discarded unit is not named on stderr; see $SCRATCH/wt-force.err"
+
 # ------------------------- 6. the gate does not make its own CLI exec itself
 
 step "The gate runs the home's own CLI pin without wedging it"
@@ -857,6 +1108,333 @@ check "$(yesno test -z "$UNKNOWN")" \
   "every_skill_manager_option_this_repo_prints_is_accepted_by_the_cli" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
+
+# -------------------------------- onboarding leaves the working tree CLEAN
+#
+# Measured: after a documented bootstrap + install, `git status --porcelain`
+# read `?? .claude.json`, and the next documented step — `wt new`, which asserts
+# a clean tree — refused with `working tree is not clean`. Onboarding a repo
+# made it unusable by the next step of onboarding it. `/.claude/` does not match
+# `/.claude.json`, and the documented rule list had four entries.
+#
+# The property under test is the general one, not "`.claude.json` is ignored":
+# after the bootstrap, nothing the home machinery put at the root is reported by
+# git status, whatever it is called — and the operator's own untracked work is
+# still reported, because a bootstrap that silenced `git status` wholesale would
+# pass this and be far worse.
+
+step "A bootstrapped checkout is still clean, and still shows the operator's own work"
+
+CLEANP="$SCRATCH/cleanproj"
+mkdir -p "$CLEANP"
+git -C "$CLEANP" init -q -b main
+git -C "$CLEANP" config user.email selftest@example.invalid
+git -C "$CLEANP" config user.name "selftest"
+# EXACTLY the four documented rules, and no fifth. The omission is the subject
+# of the defect, so the fixture must not pre-fix it — a `.gitignore` copied from
+# a working setup would make this whole section assert nothing.
+printf '/.skill-manager/\n/.claude/\n/.codex/\n/.gemini/\n' > "$CLEANP/.gitignore"
+printf 'x\n' > "$CLEANP/README.md"
+git -C "$CLEANP" add -A
+git -C "$CLEANP" -c commit.gpgsign=false commit -qm "fixture"
+check "$(yesno test "$(command grep -c . "$CLEANP/.gitignore")" = 4)" \
+  "the_clean_tree_fixture_carries_only_the_four_documented_ignore_rules" \
+  "the fixture .gitignore has $(command grep -c . "$CLEANP/.gitignore") rules; a fifth would pre-fix the defect"
+
+# No seeded home here, deliberately: this fixture is a repo being onboarded, so
+# the bootstrap has to CLONE (from the decoy global home `bare` points HOME at).
+# Seeding one would make the run refuse with "exists and is not empty" and every
+# assertion below would be about a bootstrap that never happened.
+
+# The artefact, planted at the root the way `install`/`sync` writes it, BEFORE
+# the bootstrap — that is the ordinary case, since the documented order is
+# bootstrap, then install. Its own non-vacuity: it must be reported as untracked
+# by the four documented rules, or "it is ignored afterwards" proves nothing.
+printf '{"mcpServers":{"virtual-mcp-gateway":{"type":"http","url":"http://127.0.0.1:0/mcp"}}}\n' \
+  > "$CLEANP/.claude.json"
+printf 'the operator was in the middle of something\n' > "$CLEANP/NOTES.md"
+git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-before.txt"
+check "$(yesno command grep -q '^?? \.claude\.json$' "$SCRATCH/clean-before.txt")" \
+  "the_four_documented_rules_really_do_leave_claude_json_untracked" \
+  "the fixture's .claude.json is already ignored, so the next check would pass for the wrong reason:
+$(command sed 's/^/        /' "$SCRATCH/clean-before.txt")"
+
+CLEAN_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$CLEANP" \
+  > "$SCRATCH/clean.log" 2>&1 || CLEAN_RC=$?
+check "$(yesno test "$CLEAN_RC" = 0)" \
+  "the_clean_tree_fixture_bootstrapped" \
+  "bootstrap exited $CLEAN_RC; the cleanliness checks would be about a run that did nothing. See $SCRATCH/clean.log"
+
+git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-after.txt"
+check "$(yesno absent_pattern '\.claude\.json' "$SCRATCH/clean-after.txt")" \
+  "nothing_the_home_machinery_put_at_the_root_is_left_dirty" \
+  "still reported by git status after the bootstrap:
+$(command sed 's/^/        /' "$SCRATCH/clean-after.txt")"
+
+# The other half, and it is the one that makes the check worth having: a
+# bootstrap that ignored everything would satisfy the assertion above.
+check "$(yesno command grep -q 'NOTES.md' "$SCRATCH/clean-after.txt")" \
+  "the_operators_own_untracked_work_is_still_reported" \
+  "the bootstrap silenced a file it did not create — git status no longer names NOTES.md"
+
+# And the consequence, end to end, because "clean" is only interesting as the
+# precondition of the next command.
+git -C "$CLEANP" add NOTES.md
+git -C "$CLEANP" -c commit.gpgsign=false commit -qm "the operator's work"
+WTNEW_RC=0
+( cd "$CLEANP" && bare bash "$SCRIPT_DIR/wt" new C1 ) \
+  > "$SCRATCH/clean-wtnew.out" 2> "$SCRATCH/clean-wtnew.err" || WTNEW_RC=$?
+check "$(yesno test "$WTNEW_RC" = 0)" \
+  "wt_new_is_not_refused_by_a_tree_the_bootstrap_left_behind" \
+  "wt new exited $WTNEW_RC after a clean bootstrap:
+$(command sed 's/^/        /' "$SCRATCH/clean-wtnew.out")"
+
+# ------------------------------- a refusal with nowhere to go names a command
+#
+# The one path a genuinely fresh machine takes: no `~/.skill-manager` at all.
+# `bootstrap-home.sh` refused with `error: source home does not exist: …` and
+# nothing else — correct, and it wrote nothing, but it left the operator holding
+# a checkout, an exit code and no command. Compare the exit-5 path, which prints
+# three alternatives.
+#
+# Two properties, and the second is the more important one: the refusal must
+# name something runnable, AND it must still have written nothing.
+
+step "A refusal from a machine with no home at all names a command"
+
+# A HOME with no `.skill-manager` under it. Deliberately NOT $FAKE_HOME, which
+# is seeded: that is the difference between exit 1 (no source) and exit 5 (an
+# empty source), and conflating them is how the check would measure the path
+# that already had a remedy.
+NOSRC_HOME="$SCRATCH/nosource-home"
+NOSRC_PROJ="$SCRATCH/nosource-proj"
+mkdir -p "$NOSRC_HOME" "$NOSRC_PROJ"
+git -C "$NOSRC_PROJ" init -q -b main
+git -C "$NOSRC_PROJ" config user.email selftest@example.invalid
+git -C "$NOSRC_PROJ" config user.name "selftest"
+printf 'x\n' > "$NOSRC_PROJ/README.md"
+git -C "$NOSRC_PROJ" add -A
+git -C "$NOSRC_PROJ" -c commit.gpgsign=false commit -qm "fixture"
+
+# The "nothing was written" half is asserted against a listing taken BEFORE the
+# run, and the listing is proved live further down by planting a file into a
+# copy of it and watching the comparison notice.
+listing() { command find "$1" -mindepth 1 2>/dev/null | LC_ALL=C sort; }
+NOSRC_BEFORE="$SCRATCH/nosource-before.txt"
+{ listing "$NOSRC_HOME"; listing "$NOSRC_PROJ"; } > "$NOSRC_BEFORE"
+
+NOSRC_RC=0
+env -u SKILL_MANAGER_HOME HOME="$NOSRC_HOME" \
+    JAVA_TOOL_OPTIONS="-Duser.home=$NOSRC_HOME" SKILL_MANAGER_CLI="$CLI" \
+    bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$NOSRC_PROJ" \
+    > "$SCRATCH/nosource.log" 2>&1 || NOSRC_RC=$?
+
+check "$(yesno test "$NOSRC_RC" != 0)" \
+  "a_checkout_with_no_home_above_it_is_refused" \
+  "bootstrap exited 0 with no home to copy from (rc=$NOSRC_RC); see $SCRATCH/nosource.log"
+
+# "Runnable" as a predicate over a log, not as a grep for hopeful words: the
+# first token of a candidate line must be a file this machine can execute, or a
+# name PATH resolves. `error: … does not exist` has a first token of `error:`
+# and fails it, which is the whole point.
+first_runnable() {
+  local log="$1" line cmd
+  while IFS= read -r line; do
+    cmd="$(printf '%s\n' "$line" | command sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*$//')"
+    [ -n "$cmd" ] || continue
+    if [ -f "$cmd" ] && [ -x "$cmd" ]; then printf '%s\n' "$cmd"; return 0; fi
+    if command -v "$cmd" >/dev/null 2>&1; then printf '%s\n' "$cmd"; return 0; fi
+  done < "$log"
+  return 1
+}
+
+# Non-vacuity for the predicate itself, in the same run and in both directions.
+# A predicate that answered "yes" to anything would make the assertion below
+# meaningless, and the refusal it is about is exactly a log full of prose.
+PROSE="$SCRATCH/prose-control.txt"
+cat > "$PROSE" <<'EOF'
+error: source home does not exist: /nowhere/.skill-manager (the global home)
+  There is nothing here that an operator could run.
+EOF
+check "$(yesno test -z "$(first_runnable "$PROSE" || true)")" \
+  "the_runnable_remedy_predicate_rejects_a_refusal_that_is_only_prose" \
+  "the predicate accepted '$(first_runnable "$PROSE" || true)' from a log with no command in it"
+
+NOSRC_FIX="$(first_runnable "$SCRATCH/nosource.log" || true)"
+check "$(yesno test -n "$NOSRC_FIX")" \
+  "the_no_source_refusal_names_a_command_that_exists_on_this_machine" \
+  "no runnable command in the refusal; see $SCRATCH/nosource.log"
+# And the exit-5 refusal, whose remedy was already good, measured by the SAME
+# predicate — so a future edit cannot satisfy one and lose the other.
+EMPTY_FIX="$(first_runnable "$SCRATCH/empty.log" || true)"
+check "$(yesno test -n "$EMPTY_FIX")" \
+  "the_empty_home_refusal_names_a_command_by_the_same_measure" \
+  "the exit-5 remedy stopped being runnable by the predicate the exit-1 one now passes"
+
+check "$(yesno command grep -q 'onboard' "$SCRATCH/nosource.log")" \
+  "the_no_source_refusal_names_the_step_that_creates_the_home_above_this_one" \
+  "\`onboard\` is the command that fills a fresh machine's global home and it is named nowhere"
+
+# The half that matters more than the message. Asserted against the pre-run
+# listing, and then the comparison is proved live: a copy of the baseline with
+# one planted line must NOT compare equal, or "unchanged" means "not looked at".
+{ listing "$NOSRC_HOME"; listing "$NOSRC_PROJ"; } > "$SCRATCH/nosource-after.txt"
+check "$(yesno same_file "$NOSRC_BEFORE" "$SCRATCH/nosource-after.txt")" \
+  "a_refusal_with_no_source_home_writes_nothing_anywhere" \
+  "$(command diff "$NOSRC_BEFORE" "$SCRATCH/nosource-after.txt" | command head -10)"
+command cp "$NOSRC_BEFORE" "$SCRATCH/nosource-planted.txt"
+printf '%s/planted\n' "$NOSRC_HOME" >> "$SCRATCH/nosource-planted.txt"
+check "$(yesno differs_file "$NOSRC_BEFORE" "$SCRATCH/nosource-planted.txt")" \
+  "the_wrote_nothing_comparison_notices_a_planted_file" \
+  "the comparison called a listing with an extra entry identical, so it proves nothing"
+
+# ------------------------------ every scripts/ file this skill names, it ships
+#
+# `references/skill-homes.md` and `references/onboarding.md` both said "copy
+# `scripts/agent-home.sh` into the repo root", and `close-change.sh` offered the
+# same file as a remedy — and this skill did not ship it. The only copy on the
+# machine belonged to one particular integration repo, so a literal first-time
+# onboarding had nothing to copy and the documented step could not be taken.
+#
+# The assertion is the general one, because "the docs name a file that exists"
+# is the property, not "agent-home.sh exists": every `scripts/<name>` token in
+# any tracked file here must resolve to a file under THIS skill's root.
+
+step "Every scripts/ path this skill names is one it ships"
+
+# The extracted set first. A sweep that matched nothing would report a clean
+# result forever — the same failure mode as every other grep assertion in this
+# file — and the four names below are the ones the docs and the scripts have
+# always instructed a reader to run, so the floor is stated as membership
+# rather than as a count that drifts.
+# `|| true`: `git ls-files` names the INDEX, so a tracked file that is missing
+# from disk makes grep exit 2 and, under `set -u -e`, would abort the suite
+# before the assertion that is about exactly that case could run. Measured while
+# writing the mutation proof for this very check.
+NAMED="$(cd "$SCRIPT_DIR/.." && git ls-files -z 2>/dev/null \
+  | xargs -0 command grep -ohE 'scripts/[A-Za-z0-9_][A-Za-z0-9_.-]*' 2>/dev/null \
+  | command sed 's#^scripts/##; s/[.,;:]*$//' | sort -u || true)"
+MISSING_FLOOR=""
+for want in bootstrap-home.sh new-change.sh close-change.sh wt agent-home.sh; do
+  contains "$want" "$(printf '%s\n' "$NAMED")" || MISSING_FLOOR="$MISSING_FLOOR $want"
+done
+check "$(yesno test -z "$MISSING_FLOOR")" \
+  "the_documented_script_sweep_found_the_scripts_that_are_always_documented" \
+  "the sweep did not even name:$MISSING_FLOOR — it is not looking at the right files"
+
+UNSHIPPED=""
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  [ -e "$SCRIPT_DIR/$name" ] || UNSHIPPED="$UNSHIPPED  scripts/$name"$'\n'
+done <<EOF
+$NAMED
+EOF
+check "$(yesno test -z "$UNSHIPPED")" \
+  "every_scripts_path_this_skill_names_resolves_inside_this_skill" \
+  "named in tracked files but not shipped here:
+$UNSHIPPED"
+
+# Resolution base, asserted. The whole defect survived because the file DID
+# exist — one directory up, in the integration repo that happened to carry this
+# skill as a constituent. A check that resolved `scripts/agent-home.sh` from
+# there would have been green throughout. So: prove the base is the skill root
+# by showing a path that exists ONLY outside it does not satisfy the rule.
+#
+# The decoy's own path is assembled from variables, never written as a
+# `scripts/<name>` literal: this file is tracked, so a literal here would be
+# swept up by the extraction above and the check would fail on its own fixture.
+OUTSIDE="$SCRATCH/outside-base"
+OUTSIDE_DIR="$OUTSIDE/scripts"
+OUTSIDE_NAME="not-a-file-this-skill-ships.sh"
+mkdir -p "$OUTSIDE_DIR"
+printf '#!/bin/sh\nexit 0\n' > "$OUTSIDE_DIR/$OUTSIDE_NAME"
+check "$(yesno absent "$SCRIPT_DIR/$OUTSIDE_NAME")" \
+  "a_scripts_file_that_exists_only_outside_this_skill_does_not_satisfy_the_rule" \
+  "the resolution base is not this skill's scripts/ directory"
+
+# -------------------------------- no script resolves a CLI by a relative path
+#
+# The rule, for every script in this directory: a skill-manager is
+# $SKILL_MANAGER_CLI, then whatever `command -v skill-manager` answers, then
+# nothing. A path relative to the script's own location is not evidence about
+# which build should run — it is evidence about where the checkout happens to be
+# — and when the two disagree the script runs a build nobody chose. Measured on
+# selftest.sh itself: from a worktree beside the integration repo,
+# `$SCRIPT_DIR/../../skill-manager/skill-manager` named an unrelated April clone
+# with no `home clone`, and the suite failed for reasons it is not about.
+#
+# bootstrap-home.sh's pick_cli is the deliberate exception and is NOT relative:
+# its extra candidates are anchored on `$ROOT` (the checkout being bootstrapped)
+# and on `outermost_integration_root "$ROOT"`, both derived from the target, not
+# from where this file sits.
+
+step "No script resolves a skill-manager by a path relative to itself"
+
+# The pattern, and then proof the pattern still matches the shape it is for.
+# A grep assertion that finds nothing reports the same green whether the defect
+# is absent or the pattern is a typo, and this one is a regex over punctuation,
+# which is the shape that rots. So the control is written to disk in the exact
+# spelling that shipped, and the check that it MATCHES runs first.
+REL_CLI_RE='\.\.(/\.\.)*/skill-manager/skill-manager'
+CONTROL="$SCRATCH/rel-cli-control.txt"
+# The control carries the two lines VERBATIM as they shipped, each behind a `#`
+# so that this file's own copy of them is not itself a resolution site. The
+# static sweep below drops comment lines for the same reason — a comment cannot
+# run a CLI — and the count here is taken WITHOUT that filter, so the pattern is
+# proved live against the real spelling before any filtering happens.
+cat > "$CONTROL" <<'EOF'
+#  for c in "$SCRIPT_DIR/../../skill-manager/skill-manager" \
+#           "$SCRIPT_DIR/../../../skill-manager/skill-manager"; do
+EOF
+CONTROL_HITS="$(command grep -cE "$REL_CLI_RE" "$CONTROL" || true)"
+check "$(yesno test "$CONTROL_HITS" -ge 2)" \
+  "the_relative_cli_pattern_still_matches_the_spelling_that_shipped" \
+  "the pattern matched $CONTROL_HITS of the 2 control lines, so a zero count over
+      scripts/ would prove nothing"
+
+REL_HITS="$(cd "$SCRIPT_DIR" && command grep -rnE "$REL_CLI_RE" . 2>/dev/null \
+  | command grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+  | command grep -v 'REL_CLI_RE=' || true)"
+check "$(yesno test -z "$REL_HITS")" \
+  "no_script_here_resolves_a_skill_manager_by_a_path_relative_to_itself" \
+  "these resolve a CLI from their own location:
+$(printf '%s\n' "$REL_HITS" | command sed 's/^/        /')"
+
+# The dynamic half. The static check can only see the spelling it knows; this one
+# plants the file the old code reached for, at exactly the path it reached for it
+# from, and asserts the refusal happens WITHOUT it being touched. Its own
+# non-vacuity is the decoy's existence: if the plant is wrong the "never invoked"
+# half is true for the wrong reason, so the plant is asserted first.
+REL_ROOT="$SCRATCH/relcheck"
+REL_SCRIPTS="$REL_ROOT/skill/scripts"
+mkdir -p "$REL_SCRIPTS" "$REL_ROOT/skill-manager"
+cp "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt" "$SCRIPT_DIR/_manifest.py" "$REL_SCRIPTS/" 2>/dev/null || true
+DECOY="$REL_ROOT/skill-manager/skill-manager"
+DECOY_LOG="$REL_ROOT/decoy.log"
+cat > "$DECOY" <<EOF
+#!/usr/bin/env bash
+printf 'INVOKED %s\n' "\$*" >> "$DECOY_LOG"
+exit 99
+EOF
+chmod +x "$DECOY"
+check "$(yesno executable "$DECOY")" \
+  "the_stale_clone_decoy_sits_at_the_path_the_old_fallback_reached_for" \
+  "$DECOY is not an executable file, so 'it was never invoked' would prove nothing"
+
+REL_RC=0
+run_bounded 40 env -u SKILL_MANAGER_CLI PATH=/usr/bin:/bin \
+  bash "$REL_SCRIPTS/selftest.sh" > "$REL_ROOT/child.log" 2>&1 || REL_RC=$?
+check "$(yesno test "$REL_RC" != 0)" \
+  "a_suite_with_no_pin_and_no_skill_manager_on_PATH_refuses" \
+  "it exited 0 with nothing to run against (rc=$REL_RC); see $REL_ROOT/child.log"
+check "$(yesno absent "$DECOY_LOG")" \
+  "the_refusal_did_not_reach_for_the_clone_beside_the_checkout" \
+  "the decoy was invoked: $(cat "$DECOY_LOG" 2>/dev/null | command tr '\n' ' ')"
+check "$(yesno command grep -q 'no skill-manager CLI' "$REL_ROOT/child.log")" \
+  "the_refusal_names_the_variable_that_fixes_it" \
+  "expected the SKILL_MANAGER_CLI refusal; got:
+$(command sed 's/^/        /' "$REL_ROOT/child.log" 2>/dev/null | command tail -5)"
 
 # ------------------------------------------------------------------- verdict
 
