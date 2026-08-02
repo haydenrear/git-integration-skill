@@ -72,17 +72,28 @@ usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
   --allow-empty    Accept a home with zero skills. Downgrades the refusal to a
                    warning; the home is still reported as EMPTY, never as
                    verified.
+  --no-project     Do not run the `sync --skip-mcp` that projects this home's
+                   skills into its agent homes. The home will hold skills that
+                   no agent launched here can read; combine with
+                   --allow-unprojected or the run refuses.
+  --allow-unprojected  Accept a home whose skills are not reachable from its
+                   agent homes. Downgrades the refusal to a warning; the home is
+                   never reported as verified.
 
 Exit codes: 0 ok - 1 usage/setup error - 5 the home has no skills
+            6 the home's skills are not projected into its agent homes
 EOF
 }
 
 # A home with zero skills is a distinct outcome from a broken one, and callers
 # (new-change.sh, `wt`) route it to a different remedy, so it gets its own code.
 EMPTY_EXIT=5
+# And a home that HOLDS skills no agent can read is a third outcome, with a
+# third remedy. It used to be reported as `verified`.
+UNPROJECTED_EXIT=6
 
 ROOT=""; SOURCE=""; POLICY="live"; PRINT_ENV=0; FORCE=0; QUIET=0
-ONBOARD=0; ONBOARD_GATEWAY=0; ALLOW_EMPTY=0
+ONBOARD=0; ONBOARD_GATEWAY=0; ALLOW_EMPTY=0; NO_PROJECT=0; ALLOW_UNPROJECTED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root)      ROOT="${2:?--root needs a directory}"; shift 2 ;;
@@ -94,6 +105,8 @@ while [ $# -gt 0 ]; do
     --onboard)   ONBOARD=1; shift ;;
     --onboard-gateway) ONBOARD=1; ONBOARD_GATEWAY=1; shift ;;
     --allow-empty) ALLOW_EMPTY=1; shift ;;
+    --no-project)  NO_PROJECT=1; shift ;;
+    --allow-unprojected) ALLOW_UNPROJECTED=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage; die "unknown argument: $1" ;;
   esac
@@ -920,6 +933,251 @@ EOF
   fi
 fi
 
+# ------------------------------------------- the skills have to REACH an agent
+#
+# git-integration-skill: `home clone` copies the STORE. The agent homes —
+# `<root>/.claude`, `<root>/.codex`, `<root>/.gemini` — live BESIDE the store, so
+# they are not in the copy, and this script created them empty. Measured on a
+# `wt new` worktree: rc 0, the full contract, `verified: 20 skill(s) servable`,
+# and `ls -a <wt>/.claude` answering `.` `..` — no `skills/` directory at all.
+# Every agent launched in that worktree saw zero skills.
+#
+# `skill-manager exec` documents `--no-reconcile` as "skip refreshing the home's
+# agent symlinks", and the reconcile DOES run: it prints one line per missing
+# projection, naming the exact destination and the command that would create it,
+# and creates nothing. So the fact was available on stdout of every launch and
+# nothing acted on it.
+#
+# `sync --skip-mcp` is that command. It is the product's own remedy, printed by
+# the product, and running it here is one call rather than a second
+# implementation of where a projection goes — which matters, because the
+# destination is `<agent dir>/skills/<unit>` with a `default:<agent>:<unit>`
+# ledger record beside it, and a hand-rolled symlink would be the link without
+# the record.
+#
+# What it costs, measured: ~3s on a 1-unit home, ~8s on a 5-unit one, and NOTHING
+# on a re-run, because the step is skipped when the projection is already
+# complete. Only the first bootstrap of a home pays.
+#
+# What it must not do is INSTALL. On a worktree home, a unit the project home
+# never had is a close-out blocker before any work exists (#50), and `sync`
+# resolves declared dependencies. That cannot happen when the source home is
+# complete — the copy already holds everything — so it is asserted rather than
+# assumed: the unit set is compared across the call and any addition is named.
+
+# `<agent dir>/skills` for every agent this home declares, read from the
+# descriptor. Same source as the directories themselves, so this cannot check a
+# place the launcher will not look.
+projection_dirs() {
+  descriptor_env_dirs | while IFS= read -r dir; do
+    [ -n "$dir" ] && printf '%s/skills\n' "$dir"
+  done
+}
+
+# Store skills that are NOT reachable from some agent's own view, one
+# `<agent dir>|<unit>` per line.
+#
+# `-e`, not `-L`: a dangling symlink is an entry in the directory and would
+# satisfy a check that counted names. And then the resolved path is required to
+# be inside $ROOT — a link that resolves into another checkout's store is a link
+# to another home's copy of the unit, which is the whole failure class this
+# per-checkout mechanism exists to close.
+unprojected_pairs() {
+  local dir unit dest real
+  for unit in "$STORE"/skills/*/; do
+    [ -d "$unit" ] || continue
+    [ -f "$unit/SKILL.md" ] || continue
+    unit="$(basename "$unit")"
+    while IFS= read -r dir; do
+      [ -n "$dir" ] || continue
+      dest="$dir/$unit"
+      if [ ! -e "$dest" ]; then printf '%s|%s\n' "$dir" "$unit"; continue; fi
+      real="$(cd "$dest" 2>/dev/null && pwd -P)" || real=""
+      case "$real" in
+        "$ROOT"/*) : ;;
+        *) printf '%s|%s\n' "$dir" "$unit" ;;
+      esac
+    done <<EOF
+$(projection_dirs)
+EOF
+  done
+}
+
+projected_unit_count() {
+  local unit dir ok n=0
+  for unit in "$STORE"/skills/*/; do
+    [ -d "$unit" ] || continue
+    [ -f "$unit/SKILL.md" ] || continue
+    unit="$(basename "$unit")"
+    ok=1
+    while IFS= read -r dir; do
+      [ -n "$dir" ] || continue
+      case "$(cd "$dir/$unit" 2>/dev/null && pwd -P)" in
+        "$ROOT"/*) : ;;
+        *) ok=0 ;;
+      esac
+    done <<EOF
+$(projection_dirs)
+EOF
+    [ "$ok" = 1 ] && n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+store_unit_list() { command ls -1 "$STORE/skills" 2>/dev/null | LC_ALL=C sort; }
+
+# The projections this home's OWN LEDGER already declares, as
+# `<destPath>\t<sourcePath>`, restricted to SYMLINK records whose destination is
+# inside $ROOT.
+#
+# This is the cheap half, and it is the one that matters for a worktree. A
+# `home clone` copies `installed/<unit>.projections.json` AND RE-ANCHORS IT: the
+# records in a fresh worktree home already read
+#   default:claude:debugging  DEFAULT_AGENT
+#     SYMLINK $SKILL_MANAGER_HOME/skills/debugging
+#          -> <wt>/.claude/skills/debugging
+# — the right destination, under the right root, with the right binding id. The
+# ledger is correct and the FILESYSTEM SIDE IS MISSING, which is exactly what
+# `exec`'s reconcile reports and does not fix.
+#
+# So this materializes records that exist. It is not a second opinion about
+# where a projection goes: every path here is read out of the home, none is
+# constructed. `$SKILL_MANAGER_HOME` is the store's own placeholder in the
+# record and is expanded to $STORE.
+declared_projections() {
+  # ROOT and STORE are passed as ARGUMENTS, not read from the environment: they
+  # are ordinary shell variables in this script and are not exported, so an
+  # `os.environ[...]` lookup raises, the interpreter dies, `2>/dev/null` eats the
+  # traceback and this function quietly returns nothing — a silent no-op that
+  # looks exactly like "there were no records". Measured, and it cost a run.
+  command find "$STORE/installed" -maxdepth 1 -name '*.projections.json' -print0 2>/dev/null \
+    | xargs -0 "$PY" -c '
+import json, os, sys
+root = sys.argv[1].rstrip("/")
+store = sys.argv[2]
+for path in sys.argv[3:]:
+    try:
+        doc = json.load(open(path))
+    except Exception:
+        continue
+    for binding in doc.get("bindings") or []:
+        for proj in binding.get("projections") or []:
+            if proj.get("kind") != "SYMLINK":
+                continue
+            dest = proj.get("destPath") or ""
+            src = (proj.get("sourcePath") or "").replace("$SKILL_MANAGER_HOME", store)
+            if not dest or not src:
+                continue
+            if dest != root and not dest.startswith(root + os.sep):
+                continue
+            print("%s\t%s" % (dest, src))
+' "$ROOT" "$STORE" 2>/dev/null
+}
+
+# Create the ones that are missing. Only ever creates: an existing directory or
+# file at a destination is someone's data and is left alone, so it shows up in
+# the shortfall report rather than being silently replaced. A symlink that does
+# NOT resolve inside $ROOT is the one exception — that is a stale link from the
+# home this one was copied from, and leaving it would leave an agent reading
+# another checkout's copy of the unit.
+materialize_declared_projections() {
+  local dest src made=0 real
+  while IFS="$(printf '\t')" read -r dest src; do
+    [ -n "$dest" ] && [ -n "$src" ] || continue
+    [ -e "$src" ] || continue
+    if [ -L "$dest" ]; then
+      real="$(cd "$dest" 2>/dev/null && pwd -P)" || real=""
+      case "$real" in "$ROOT"/*) continue ;; esac
+      command rm -f "$dest"
+    elif [ -e "$dest" ]; then
+      continue
+    fi
+    mkdir -p "$(dirname "$dest")"
+    ln -s "$src" "$dest" && made=$((made + 1))
+  done <<EOF
+$(declared_projections)
+EOF
+  [ "$made" = 0 ] || say "projected: $made link(s) materialized from this home's own binding ledger"
+  return 0
+}
+
+project_agent_homes() {
+  [ "$frozen_skip" = 0 ] || return 0
+  [ "$NO_PROJECT" = 0 ] || { say "project:   skipped (--no-project)"; return 0; }
+  [ -n "$(unprojected_pairs)" ] || { say "project:   already projected — nothing to do"; return 0; }
+  require_local_home "project"
+
+  # Ledger first, sync only if the ledger cannot answer. The order is not a
+  # preference, it is the difference between a closable worktree and an
+  # unclosable one:
+  #
+  #   `sync` refreshes UNIT CONTENT. Measured on a worktree whose home was a
+  #   correct copy of a complete project home: `sync --skip-mcp` projected every
+  #   unit AND left `skills/deploy-helm/.git/index` differing from the project
+  #   home's, and `home close-out` then refused the teardown —
+  #   `BLOCKED skill:deploy-helm (merged) - 1 file(s) come from the source`.
+  #   That is issue #50 reintroduced by the fix for #10. With the ledger step
+  #   first, the same worktree needs no sync at all, and close-out exits 0.
+  #
+  #   (`.git/index` is stat-dependent and is not unit work; that `close-out`
+  #   counts it is a skill-manager finding, reported separately. This ordering
+  #   is correct regardless of how that lands, because it also makes the common
+  #   path instant and offline.)
+  materialize_declared_projections
+  [ -n "$(unprojected_pairs)" ] || { say "project:   done from the ledger — no sync needed"; return 0; }
+
+  # What is left is a unit with NO binding record — a home that was scaffolded
+  # rather than installed into, or a unit installed before the ledger existed.
+  # Only `sync` can create the record, so only now is it worth its cost.
+  heading "Projecting the remaining skills into the agent homes"
+  local pass before after added
+  # AT MOST TWO PASSES, and the second one only when the first INSTALLED
+  # something. `sync` is not a fixpoint across an install: measured on a home
+  # whose source lacked two transitive deps, one `sync --skip-mcp` installed
+  # `deploy-helm` and `tracing-observability` and projected only the three units
+  # that existed when it started, leaving the two it had just installed reported
+  # by its own reconcile as unprojected. The second pass installs nothing and
+  # projects them (10s). Bounded at two rather than looped to a fixpoint on
+  # purpose: a loop over a step that can install would be a loop over a step
+  # that can grow the work, and "it added units again" is a finding to print,
+  # not a condition to iterate on.
+  for pass in 1 2; do
+    before="$(store_unit_list)"
+    # `>&2` for the same reason the clone is: stdout carries the contract and
+    # --print-env output, nothing else.
+    #
+    # The exit code is deliberately not consulted. `sync` exits non-zero for
+    # persisted error records that have nothing to do with the projection —
+    # measured: rc 7 from NEEDS_GIT_MIGRATION, rc 1 from a markdown import
+    # violation — on runs that projected every unit correctly. The verdict comes
+    # from re-measuring the links, which is what the word `verified` is about.
+    # shellcheck disable=SC2046
+    env $(agent_env_words) SKILL_MANAGER_HOME="$STORE" "$CLI" sync --skip-mcp >&2 || true
+    after="$(store_unit_list)"
+    added="$(command comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null || true)"
+    # The sync creates the missing records; materialize whatever it declared but
+    # did not write, for the same reason as above.
+    materialize_declared_projections
+    [ -n "$added" ] || break
+    printf '  WARNING: the projection sync also INSTALLED unit(s) this home did not have:\n' >&2
+    printf '    %s\n' $added >&2
+    if [ "$IS_WORKTREE" = 1 ]; then
+      printf '    This is a worktree home, and every unit its project home lacks is a\n' >&2
+      printf '    close-out blocker at teardown (issue #50). The cause is a project home\n' >&2
+      printf '    that is missing its own declared dependencies; resolve them THERE:\n' >&2
+      printf '      %s\n' "$SCRIPT_DIR/bootstrap-home.sh --root '$(dirname "$PROJECT_HOME")' --force" >&2
+    fi
+    [ -n "$(unprojected_pairs)" ] || break
+    [ "$pass" = 1 ] && say "project:   re-running — the units it installed are not projected yet"
+  done
+}
+
+project_agent_homes
+# Again, after the sync: `sync` writes <root>/.claude.json and may create other
+# root-level state, and the call above the emptiness gate ran before it existed.
+# Idempotent, so the cost of calling it twice is one `git status`.
+ensure_run_artifacts_ignored
+
 # --------------------------------------------------------------- assertions
 
 # Asserted, not reported. Each of these has a way of being quietly false, and
@@ -1015,6 +1273,44 @@ verify() {
     $(home_env_prefix) $CLI onboard --skip-gateway"
   fi
 
+  # And can an AGENT reach it? The count above is of `$STORE/skills`, which no
+  # agent reads. An agent reads `<root>/.claude/skills` and its two siblings, and
+  # a home whose store is full and whose agent homes are empty passes every
+  # other check in this function — descriptor right, policy right, shims right,
+  # `exec --print-env` happy — while serving nothing. That is what `verified: 20
+  # skill(s) servable` was printed over.
+  #
+  # So the word is earned here or it is not printed. `projected` is the number of
+  # store skills reachable from EVERY declared agent's own view, by a link that
+  # resolves inside $ROOT.
+  local projected shortfall
+  projected="$(projected_unit_count)"
+  shortfall="$(unprojected_pairs)"
+  if [ -n "$shortfall" ] && [ "$ALLOW_UNPROJECTED" != 1 ]; then
+    printf 'error: this home holds %s skill(s) and an agent launched here can reach %s.\n' \
+      "$skills" "$projected" >&2
+    printf '  A skill is served through <root>/.<agent>/skills/<unit>, not out of the\n' >&2
+    printf '  store. These are missing or resolve outside %s:\n' "$ROOT" >&2
+    while IFS='|' read -r d u; do
+      [ -n "$u" ] && printf '    %s/%s\n' "$d" "$u" >&2
+    done <<EOF
+$shortfall
+EOF
+    cat >&2 <<EOF
+  The command that creates them is:
+    $(home_env_prefix) $CLI sync --skip-mcp
+  This script runs it for you; reaching this message means it ran and the links
+  are still not there, so run it by hand and read what it says. Or accept an
+  unservable home deliberately with --allow-unprojected.
+EOF
+    exit "$UNPROJECTED_EXIT"
+  fi
+  if [ -n "$shortfall" ]; then
+    printf '  WARNING: %s of %s skill(s) are not reachable from an agent launched here\n' \
+      "$((skills - projected))" "$skills" >&2
+    printf '           (--allow-unprojected). This home is NOT verified.\n' >&2
+  fi
+
   # Advisory, and the reason bootstrap used to disagree with `skill-manager home
   # verify`: that command REFUSES a home holding an unresolvable reference, and
   # a clone always produces some, because it skips venvs/, tools/, npm/ and
@@ -1038,12 +1334,20 @@ EOF
   fi
 
   [ "$QUIET" = 1 ] || {
+    local agents; agents="$(projection_dirs | while IFS= read -r d; do
+      [ -n "$d" ] && printf '%s ' "$(basename "$(dirname "$d")")"; done)"
     info "home:      $STORE"
     info "policy:    $policy"
     info "descriptor:$descriptor"
     info "shims:     $STORE/bin/launch (claude, codex, gemini)"
     info "skills:    $skills"
-    info "verified:  $skills skill(s) servable; descriptor env inside $ROOT; claude/codex resolve to this home's shims"
+    info "projected: $projected of $skills into each of ${agents% }"
+    # Printed ONLY when every store skill is reachable from every declared
+    # agent. The number is the projected count, not the store count: they are
+    # equal here by construction, and stating the one that was measured is the
+    # difference between a report and a claim.
+    [ -n "$shortfall" ] || \
+      info "verified:  $projected skill(s) servable — an agent launched here reads them from ${agents% }; descriptor env inside $ROOT; claude/codex resolve to this home's shims"
   }
 }
 

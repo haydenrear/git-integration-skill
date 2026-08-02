@@ -198,6 +198,32 @@ is copied from holds none either. Install into the PROJECT home, then re-run:
   $SCRIPT_DIR/bootstrap-home.sh --root "$ROOT" --onboard
   $0 $TICKET${BASE:+ $BASE}
 EOF
+    # Exit 6 is "the home holds skills that no agent launched here can read":
+    # the store copied fine, the projection into <wt>/.claude|.codex|.gemini did
+    # not complete. Distinct from 5, and the generic remedy below is wrong for
+    # it — the project home is not the problem, it has no projection to give
+    # (the agent homes live BESIDE the store and are not part of a clone).
+    #
+    # The FIX names THIS script, not `bootstrap-home.sh --root $WT`: the
+    # worktree was rolled back a few lines above, so $WT no longer exists and a
+    # remedy pointing at it would fail on a path that is gone. Re-running is
+    # right because bootstrap-home.sh will re-attempt the projection; the
+    # diagnosis, if it recurs, is in the sync output it already printed.
+    elif [ "$HOME_RC" = 6 ]; then
+      contract_fail "$0 $TICKET${BASE:+ $BASE}" \
+        "this worktree's home held skills that no agent launched in it could read (the projection into .claude/.codex/.gemini did not complete)"
+      cat >&2 <<EOF
+
+The home was cloned and held units, but they were not linked into the worktree's
+agent homes, so an agent started there would have seen NONE of them. That used
+to be reported as \`verified\` and exit 0. bootstrap-home.sh named the exact
+missing links and the \`sync --skip-mcp\` that creates them, above.
+
+  $0 $TICKET${BASE:+ $BASE}
+
+If it refuses the same way again, the sync itself is failing: run the command
+bootstrap-home.sh printed, by hand, and read what it says.
+EOF
     else
     contract_fail "$SCRIPT_DIR/bootstrap-home.sh --root $ROOT" \
       "no Skill Manager home could be created for this worktree (usually: $ROOT has no project home yet)"

@@ -164,6 +164,14 @@ $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-m
 #   the gateway is a contended singleton); for a worktree the remedy is always
 #   the PROJECT home, because units installed into the copy block teardown (#50).
 #   --allow-empty accepts an empty home deliberately.
+#   It also PROJECTS the home's skills into <root>/.claude|.codex|.gemini, which
+#   is where an agent reads them — a clone copies the STORE, and no agent reads
+#   the store. It materializes the links the home's own binding ledger already
+#   declares (instant, offline, touches no unit content, so the worktree stays
+#   closable) and falls back to `sync --skip-mcp` only for a unit that has no
+#   binding record. The run reports `projected: N of M` and prints `verified:`
+#   ONLY when N = M; a home whose skills an agent cannot read exits 6 and names
+#   every missing link. --allow-unprojected accepts one; --no-project skips it.
 $S/selftest.sh                                     # prove that pair on a disposable fixture, bare shell
 
 # --- change (the cheap path; see above) ---

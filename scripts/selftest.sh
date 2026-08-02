@@ -311,6 +311,169 @@ check "$(yesno command grep -q 'does NOT recreate <home>/venvs' "$SCRATCH/bootst
   "the_caveat_does_not_claim_the_sync_repairs_links_into_venvs" \
   "the caveat still presents sync --force-scripts as the fix for a dangling venv link; it is not a fixpoint"
 
+# ----------------------- 1b2. the skills have to reach an AGENT, not the store
+#
+# The highest-leverage check in this file. `verified: 20 skill(s) servable` was
+# printed over a worktree whose `.claude`, `.codex` and `.gemini` held no
+# `skills/` directory at all — because the count came from `$STORE/skills`, and
+# no agent reads the store. An agent reads `<root>/.<agent>/skills/<unit>`.
+#
+# Everything below therefore asserts on THE LINKS AN AGENT WOULD FOLLOW, and
+# every assertion is shown able to fail by breaking a link three different ways
+# in the same run. A node that recounted the store would stay green through all
+# three, which is exactly how the defect survived.
+
+step "The skills reach an agent, and 'verified' is printed only when they do"
+
+WTP="$SCRATCH/proj-P1"
+git -C "$PROJ" worktree add -q -b feature/P1 "$WTP" main
+WTP_HOME="$WTP/.skill-manager"
+PROJ_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" > "$SCRATCH/proj.log" 2>&1 || PROJ_RC=$?
+
+# The agent directories, read the way the script reads them, so this cannot
+# check a place the launcher does not look.
+AGENT_DIRS=".claude .codex .gemini"
+
+# Non-vacuity first: a store with nothing in it makes "every unit is projected"
+# true over an empty set, which is the exact shape of the bug in mirror image.
+STORE_UNITS=0
+for d in "$WTP_HOME"/skills/*/; do
+  [ -d "$d" ] && [ -f "$d/SKILL.md" ] && STORE_UNITS=$((STORE_UNITS + 1))
+done
+check "$(yesno test "$STORE_UNITS" -ge 1)" \
+  "the_projection_fixture_home_actually_holds_a_skill" \
+  "the home holds $STORE_UNITS skill(s); 'all of them are projected' would be true of nothing"
+check "$(yesno test "$PROJ_RC" = 0)" \
+  "a_bootstrapped_worktree_home_is_accepted" \
+  "bootstrap exited $PROJ_RC; see $SCRATCH/proj.log"
+
+# All three agents, independently and named, so a future agent-specific
+# regression says which one.
+for agent in $AGENT_DIRS; do
+  missing=""
+  for d in "$WTP_HOME"/skills/*/; do
+    [ -d "$d" ] && [ -f "$d/SKILL.md" ] || continue
+    u="$(basename "$d")"
+    dest="$WTP/$agent/skills/$u"
+    # -e, not -L: a dangling symlink is still a directory entry, and a check
+    # that counted entries would accept one.
+    if [ ! -e "$dest" ]; then missing="$missing $u(absent)"; continue; fi
+    real="$(cd "$dest" 2>/dev/null && pwd -P)" || real=""
+    case "$real" in
+      "$WTP"/*) : ;;
+      *) missing="$missing $u(resolves to ${real:-<nothing>})" ;;
+    esac
+  done
+  check "$(yesno test -z "$missing")" \
+    "every_skill_in_the_home_is_readable_by_${agent#.}_from_inside_the_worktree" \
+    "an agent launched here would not see:$missing"
+done
+
+# The banner. Vacuity guard first — if the run had failed earlier there would be
+# no `verified:` line and "it did not claim what it could not do" would be
+# trivially true — then the POSITIVE direction, with the number matching the
+# links that were just counted rather than the store.
+PROJ_SKILLS_LINE="$(command grep -m1 '^  skills:' "$SCRATCH/proj.log" || true)"
+check "$(yesno test -n "$PROJ_SKILLS_LINE")" \
+  "the_projection_run_got_far_enough_to_report_on_the_home" \
+  "no 'skills:' line in $SCRATCH/proj.log — the checks below would be about a run that died first"
+PROJ_VERIFIED="$(command grep -m1 '^  verified:' "$SCRATCH/proj.log" || true)"
+check "$(yesno contains "$STORE_UNITS skill(s) servable" "$PROJ_VERIFIED")" \
+  "a_fully_projected_home_is_reported_as_verified_with_the_projected_count" \
+  "expected '$STORE_UNITS skill(s) servable', got '${PROJ_VERIFIED:-<no verified: line>}'"
+check "$(yesno command grep -q "^  projected: $STORE_UNITS of $STORE_UNITS" "$SCRATCH/proj.log")" \
+  "the_run_states_how_many_of_the_stores_skills_an_agent_can_reach" \
+  "no 'projected: $STORE_UNITS of $STORE_UNITS' line; see $SCRATCH/proj.log"
+
+# --- and now break it, three ways, and require the measurement to notice.
+#
+# `--no-project --allow-unprojected` re-measures WITHOUT repairing: the repair is
+# the other half of the fix and would hide the mutation. Each case re-runs the
+# real measurement code, so what is proved is that the SCRIPT can see it, not
+# that this file can.
+BROKEN_UNIT="$(basename "$(command ls -d "$WTP_HOME"/skills/*/ | command head -1)")"
+remeasure() { # $1 = log name
+  bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" --force \
+    --no-project --allow-unprojected > "$SCRATCH/$1" 2>&1 || true
+}
+
+# `mkdir -p` and `|| true` around every mutation below: when the fix is reverted
+# these directories do not exist AT ALL (that is the defect), and a bare `ln -s`
+# into a missing directory kills the suite under `set -e` before the checks that
+# are about exactly that state can run. Measured while taking the mutation proof.
+mkdir -p "$WTP/.claude/skills"
+
+# (1) the link is simply gone — the case the store count could not see.
+command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
+remeasure "proj-deleted.log"
+check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-deleted.log")" \
+  "deleting_one_agent_link_changes_the_reported_projection_count" \
+  "the count did not move when a link was removed — it is counting the store, not the links:
+$(command grep -m1 '^  projected:' "$SCRATCH/proj-deleted.log" || printf '        <no projected: line>')"
+check "$(yesno absent_pattern '^  verified:' "$SCRATCH/proj-deleted.log")" \
+  "a_home_with_a_missing_agent_link_is_not_reported_as_verified" \
+  "'verified:' was printed over a home an agent cannot read $BROKEN_UNIT from"
+
+# (2) the entry exists and resolves to nothing. A directory listing cannot tell
+#     this from a working link.
+ln -s "$WTP_HOME/skills/no-such-unit-at-all" "$WTP/.claude/skills/$BROKEN_UNIT" || true
+remeasure "proj-dangling.log"
+check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-dangling.log")" \
+  "a_dangling_agent_link_does_not_count_as_a_projection" \
+  "a link to a nonexistent target was counted; see $SCRATCH/proj-dangling.log"
+
+# (3) the entry resolves — into ANOTHER checkout's store. This is the one a
+#     "does it resolve" check misses, and it is a per-checkout isolation failure:
+#     the agent would be reading the project home's copy of the unit.
+command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
+ln -s "$PROJ_HOME/skills/$BROKEN_UNIT" "$WTP/.claude/skills/$BROKEN_UNIT" || true
+remeasure "proj-foreign.log"
+check "$(yesno command grep -q "^  projected: 0 of $STORE_UNITS" "$SCRATCH/proj-foreign.log")" \
+  "an_agent_link_that_resolves_into_another_checkout_does_not_count" \
+  "a link into $PROJ_HOME was counted as this home serving the unit; see $SCRATCH/proj-foreign.log"
+
+# The refusal, and its code. Without --allow-unprojected the run must not exit 0
+# on a home an agent cannot read, and it must name the exact destination.
+UNPROJ_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" --force --no-project \
+  > "$SCRATCH/proj-refuse.log" 2>&1 || UNPROJ_RC=$?
+check "$(yesno test "$UNPROJ_RC" = 6)" \
+  "an_unservable_home_exits_with_the_unprojected_code" \
+  "expected exit 6, got $UNPROJ_RC; see $SCRATCH/proj-refuse.log"
+check "$(yesno command grep -q "\.claude/skills/$BROKEN_UNIT" "$SCRATCH/proj-refuse.log")" \
+  "the_refusal_names_the_link_an_agent_would_have_followed" \
+  "the refusal does not name $WTP/.claude/skills/$BROKEN_UNIT; see $SCRATCH/proj-refuse.log"
+
+# And the repair, because a check that only proves the script can refuse leaves
+# the operator with a refusal and no way out. This is the whole D1 fix in one
+# line: a plain re-run makes the home servable again.
+command rm -f "$WTP/.claude/skills/$BROKEN_UNIT"
+REPAIR_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$WTP" --force \
+  > "$SCRATCH/proj-repair.log" 2>&1 || REPAIR_RC=$?
+check "$(yesno test "$REPAIR_RC" = 0)" \
+  "a_plain_rerun_repairs_the_projection" \
+  "bootstrap exited $REPAIR_RC on a home with one missing link; see $SCRATCH/proj-repair.log"
+check "$(yesno exists "$WTP/.claude/skills/$BROKEN_UNIT")" \
+  "the_repaired_link_is_there_and_resolves" \
+  "$WTP/.claude/skills/$BROKEN_UNIT still does not resolve after the repair run"
+check "$(yesno command grep -q '^  verified:' "$SCRATCH/proj-repair.log")" \
+  "the_repaired_home_is_reported_as_verified_again" \
+  "the repair run did not print 'verified:'; see $SCRATCH/proj-repair.log"
+
+# The teardown property, which is what makes the REPAIR MECHANISM the one it is.
+# Projecting through `sync` refreshes unit CONTENT — measured: it left
+# skills/<unit>/.git/index differing from the project home's and `home close-out`
+# then refused the worktree, which is issue #50 reintroduced by the fix for #10.
+# The ledger-first path touches no unit content, so the worktree stays closable.
+( cd "$PROJ" && bare bash "$SCRIPT_DIR/close-change.sh" "$WTP" --dry-run ) \
+  > "$SCRATCH/proj-closeout.log" 2>&1 || true
+check "$(yesno command grep -q 'gate:      clean' "$SCRATCH/proj-closeout.log")" \
+  "projecting_a_worktree_home_does_not_make_it_unclosable" \
+  "the close-out gate refused a worktree whose only change was its own projection:
+$(command grep -E 'BLOCKED|^  [a-z]+ +skill' "$SCRATCH/proj-closeout.log" | command sed 's/^/        /')"
+
 # ------------------------------------------- 1c. a home with nothing in it (#10)
 
 step "A home with no skills is refused, not reported as verified"

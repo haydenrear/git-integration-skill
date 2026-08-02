@@ -361,6 +361,45 @@ Two consequences worth stating:
   into the copy are units the project never had — every one of them a teardown
   blocker before any work exists (issue #50).
 
+- **A home full of skills is not a home an agent can read them from.** The store
+  is `<home>/skills/`. *No agent reads it.* An agent reads
+  `<root>/.claude/skills/<unit>` and its `.codex` / `.gemini` siblings, which are
+  symlinks into the store, recorded in `installed/<unit>.projections.json` as
+  `default:<agent>:<unit>` bindings.
+
+  `home clone` copies the **store**. The agent homes live *beside* it, so they
+  are not in the copy — and a freshly cloned worktree home therefore has a full
+  store and three empty agent directories. Measured: `wt new`, exit 0, full
+  contract, `verified: 20 skill(s) servable`, and `ls -a <wt>/.claude` answering
+  `.` and `..`. Every agent launched in that worktree saw **zero** skills.
+  `skill-manager exec` reports it on every launch — one `! reconcile: no
+  skill-manager projection for <u> on <agent> at <path>` line per missing
+  link — and creates nothing.
+
+  `bootstrap-home.sh` now fixes it, and the order it fixes it in matters:
+
+  1. **From the home's own ledger.** `home clone` copies
+     `installed/<unit>.projections.json` *and re-anchors it*, so a fresh
+     worktree home already declares the right destination under the right root.
+     The records are correct; only the symlinks are missing. Materializing them
+     is instant, offline, and touches no unit content.
+  2. **`sync --skip-mcp`, only for what the ledger cannot answer** — a unit with
+     no binding record at all, which is what a scaffolded or hand-seeded home
+     has.
+
+  That order is not a preference. `sync` refreshes unit *content*: measured on a
+  worktree whose home was a correct copy of a complete project home, projecting
+  through `sync` left `skills/<unit>/.git/index` differing from the project
+  home's and `home close-out` then **refused the teardown** — issue #50
+  reintroduced by the fix for this. With the ledger step first the same worktree
+  needs no sync at all and closes cleanly.
+
+  The run then reports `projected: N of M into each of .claude .codex .gemini`,
+  and prints `verified:` **only when N = M**. A home an agent cannot read its
+  skills from exits `6` and names every missing link plus the `sync --skip-mcp`
+  that would create it; `--allow-unprojected` accepts one deliberately (still
+  never as *verified*), and `--no-project` skips the projection step entirely.
+
 ## The first launch is gated on change awareness (exit 8)
 
 A bootstrapped home is not the same thing as a home you can launch from. There
