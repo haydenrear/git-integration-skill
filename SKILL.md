@@ -92,11 +92,46 @@ constituent would clobber it.
 |---|---|---|
 | Create / onboard an integration repo | `references/onboarding.md` | `scripts/init-integration.sh`, `scripts/add-constituent.sh`, `scripts/finalize-constituents.sh`, `scripts/verify.sh` |
 | Give a checkout its own skill-manager home | `references/skill-homes.md` | `scripts/bootstrap-home.sh`, `scripts/selftest.sh` |
-| Make a ticketed multi-repo change | `references/worktrees.md` | `scripts/new-change.sh`, `scripts/close-change.sh` |
+| Make a ticketed multi-repo change | nothing — run `scripts/wt` and act on its output; `references/worktrees.md` is the explanation | `scripts/wt`, `scripts/new-change.sh`, `scripts/close-change.sh` |
 | Fan a merged change out to constituents | `references/propagation.md` | `scripts/propagate.sh` |
 | Scaffold spec / test-graph / deploy | `references/composition.md` | (invokes the composed skills) |
 | Refresh from upstream (destructive) | `references/git-model.md` | `scripts/refresh.sh` |
 | Understand *why* the git model works | `references/git-model.md` | — |
+
+## The cheap path: `scripts/wt`
+
+Creating and closing worktrees is the thing this repo does all day, so it must
+cost an agent two commands and no reading. It does:
+
+```bash
+<this-skill>/scripts/wt new   TICKET-123     # worktree + its own home, launchable
+<this-skill>/scripts/wt close TICKET-123     # teardown, through the close-out gate
+```
+
+**Stdout is the contract and carries nothing else.** Act on it directly; there
+is nothing to look up.
+
+```
+WORKTREE   /path/to/repo-TICKET-123
+BRANCH     feature/TICKET-123 (from main, constituent repo deploy-helm)
+LAUNCH     /path/to/repo-TICKET-123/.skill-manager/bin/launch/claude
+IF-EXIT-8  /path/to/repo-TICKET-123/.skill-manager/bin/cli/skill-manager home drift --ack
+CLOSE      <this-skill>/scripts/wt close TICKET-123
+PROPAGATE  <this-skill>/scripts/propagate.sh TICKET-123   # integration repos only
+```
+
+A failure is two lines, and the second one runs:
+
+```
+FAILED     the project home /path/to/repo/.skill-manager holds no skills, ...
+FIX        <this-skill>/scripts/bootstrap-home.sh --root /path/to/repo --onboard
+```
+
+`wt` holds no policy of its own — it picks a verb, suppresses the prose, and
+forwards the contract that `new-change.sh` and `close-change.sh` emit. Those two
+remain the implementation and remain a matched pair (issue #50). Add `--verbose`
+to see everything they say. The rest of this page and `references/worktrees.md`
+explain *why* each line is what it is; the happy path does not need them.
 
 ## Quick reference
 
@@ -131,7 +166,11 @@ $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-m
 #   --allow-empty accepts an empty home deliberately.
 $S/selftest.sh                                     # prove that pair on a disposable fixture, bare shell
 
-# --- change ---
+# --- change (the cheap path; see above) ---
+$S/wt new TICKET-123                               # worktree + home; stdout IS the next move
+$S/wt close TICKET-123                             # teardown through the gate
+
+# --- change (the same thing, with the prose) ---
 $S/new-change.sh TICKET-123                        # worktree on feature/TICKET-123
 #   ...acts on the NEAREST enclosing git repo and prints which one and of what
 #      kind (integration | constituent | standalone). From a constituent it

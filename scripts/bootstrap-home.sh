@@ -571,8 +571,16 @@ if [ "$bootstrapped" = 0 ]; then
   fi
 
   # 1. Clone. The only step that names the source, and it only reads it.
+  #
+  # `>&2` because `home clone`'s report is diagnostics, and THIS SCRIPT'S STDOUT
+  # IS RESERVED. It carries the FAILED/FIX contract, and `--print-env` output
+  # meant to be `eval`ed; a caller that captures it must get those bytes and
+  # nothing else. Without the redirect the clone's ten-line report was prepended
+  # to the contract `wt new` prints — measured, and exactly the "25 lines of
+  # prose" this work exists to remove. Every other CLI call here is already
+  # captured or sent to /dev/null; this was the one that was not.
   if [ "$need_clone" = 1 ]; then
-    "$CLI" home clone --from "$SOURCE" --to "$STORE" \
+    "$CLI" home clone --from "$SOURCE" --to "$STORE" >&2 \
       || die "home clone failed; $STORE is not usable"
     cloned=1
   fi

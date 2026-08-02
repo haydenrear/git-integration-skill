@@ -4,6 +4,41 @@ A cross-repo change is made once, in one parent worktree, against one ticket,
 then fanned out. This is the composition idea: **multi-repo changes need a
 ticket and a worktree, but no submodules** — the worktree is just files.
 
+## If you are here to create a worktree, you do not need this page
+
+```bash
+<this-skill>/scripts/wt new   TICKET-123
+<this-skill>/scripts/wt close TICKET-123
+```
+
+Run it from anywhere inside the repo you want branched. It resolves the repo,
+creates the worktree, gives it its own Skill Manager home, and prints the
+contract. **Everything an agent needs next is on stdout**, one key per line,
+every value a path or a command that runs:
+
+| Key | What it is |
+|---|---|
+| `WORKTREE` | where to edit |
+| `BRANCH` | what was branched, from what, in which repo and of what kind |
+| `LAUNCH` | starts an agent bound to **this worktree's** home |
+| `IF-EXIT-8` | clears the first-launch drift gate (see below) — run it only if `LAUNCH` refuses with exit 8 |
+| `CLOSE` | tears the worktree down through the close-out gate |
+| `PROPAGATE` | the constituent fan-out; printed only for an `integration` repo |
+
+A refusal is two lines — `FAILED` (what) and `FIX` (one command that runs) —
+with the full explanation on stderr. `--verbose` shows that explanation on a
+successful run too.
+
+**The keys are the interface, not the path.** git-issue-skill#4 asks whether
+worktree provisioning should live in `git-issue` or in `skill-manager` rather
+than here; a caller that reads these keys keeps working across such a move, and
+one that parses the prose never could. If you add a key, add it to this table.
+
+The rest of this page is the *explanation*: which repo gets branched and why,
+where the worktree may live, and what the gates are for. It is worth reading
+once. It is not worth reading before every ticket, and the whole point of `wt`
+is that you do not have to.
+
 ## Which repo `new-change.sh` acts on, and where the worktree goes
 
 Both of these were wrong in ways that produced no error message, so they are
@@ -59,6 +94,9 @@ what `new-change.sh` opened, from either repo.
   per affected constituent, all named `feature/<TICKET>`.
 
 ## Flow
+
+Written out in full, with the prose kept. `wt new TICKET-123` is steps 1 and 1b
+in one command with the narration suppressed, and `wt close TICKET-123` is 4b.
 
 ```bash
 S=<this-skill>/scripts

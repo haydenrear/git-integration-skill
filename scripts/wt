@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# wt new <TICKET> [base-branch] [--integration] [--no-home]
+# wt close <TICKET|PATH> [--force] [--dry-run]
+#
+# The cheap path. One entry point for the whole worktree lifecycle, runnable by
+# an agent that knows the ticket id and nothing else.
+#
+# Why this file exists
+# --------------------
+# Creating a worktree correctly in this model used to require reading five
+# pages first — CLAUDE.md, INTEGRATION.md, references/skill-homes.md,
+# references/worktrees.md and git-issue-workflow's references/provision.md —
+# because the rules that matter (which repo gets branched, where the worktree
+# may live, that it needs its own Skill Manager home, which home that home must
+# be a copy of, and that it may not be removed with `git worktree remove`) are
+# spread across all of them. The observed failure mode is not that an agent
+# reads them slowly. It is that it does not read them at all: it writes its own
+# script, which knows none of those rules, and the damage shows up at teardown.
+#
+# So the entry point has to be cheaper than improvising one. That means:
+#
+#   * ONE name, two verbs, no options you have to know about.
+#   * The output is the next move. Stdout carries a fixed set of KEY/value
+#     lines and nothing else — see `contract` in lib.sh. Every value is a path
+#     or a command that runs.
+#   * A failure prints two lines: what failed, and the one command that fixes
+#     it. The explanation still exists, on stderr, and is printed only when it
+#     is needed.
+#
+# What this file is NOT
+# ---------------------
+# It holds no policy. Every decision — which repo, where the worktree goes,
+# which home it is cloned from, whether it may be removed — stays in
+# new-change.sh, close-change.sh and lib.sh, and the CONTRACT LINES ARE EMITTED
+# BY THOSE SCRIPTS, not assembled here. That is deliberate and it is issue #50:
+# the worktree a ticket names is computed by `ticket_worktree_path`, once, and
+# a front door that re-derived it would be a second opinion about which home a
+# worktree must close into. `wt` chooses a verb, suppresses prose, and forwards
+# bytes.
+#
+# Which also answers git-issue-skill#4 — whether this primitive belongs in
+# `git-issue` or in `skill-manager` rather than here. The interface a caller
+# depends on is the KEY set, not this path: a `wt` shipped from somewhere else
+# is compatible if it prints WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE on
+# success and FAILED / FIX on failure. Callers that read those keys survive the
+# move; callers that parse the prose never could.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: wt new   <TICKET> [base-branch] [--integration] [--no-home] [--verbose]
+       wt close <TICKET|PATH> [--force] [--dry-run] [--verbose]
+
+  new     Create the worktree for TICKET AND its own Skill Manager home, in the
+          repo you are standing in, and leave it launchable.
+  close   Tear that worktree down through the close-out gate, which refuses
+          while its home still holds work that removing it would destroy.
+
+  --verbose  Also show the explanatory output of the underlying script.
+
+Stdout is the contract and carries nothing else:
+
+  new, on success     WORKTREE   where to edit
+                      BRANCH     what was branched, from what
+                      LAUNCH     starts an agent bound to this worktree's home
+                      IF-EXIT-8  clears the first-launch drift gate
+                      CLOSE      tears it down through the gate
+                      PROPAGATE  the fan-out (integration repos only)
+  close, on success   CLOSED / BRANCH / DELETE
+  either, on failure  FAILED     one line, what went wrong
+                      FIX        one command, run it
+
+references/worktrees.md explains WHY each of those is what it is. The happy
+path does not need it.
+EOF
+}
+
+VERB="${1:-}"; [ $# -gt 0 ] && shift || true
+case "$VERB" in
+  new)   TARGET_SCRIPT="$SCRIPT_DIR/new-change.sh" ;;
+  close) TARGET_SCRIPT="$SCRIPT_DIR/close-change.sh" ;;
+  ""|-h|--help|help) usage; [ -n "$VERB" ] && exit 0 || exit 1 ;;
+  *)     usage; die_fix 1 "$SCRIPT_DIR/wt help" "unknown verb: $VERB (expected 'new' or 'close')" ;;
+esac
+
+# --verbose is this file's own; everything else is forwarded verbatim, so `wt`
+# never has to be taught an option the underlying script grows.
+VERBOSE=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --verbose|-v) VERBOSE=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+[ "${#ARGS[@]}" -gt 0 ] || { usage; die_fix 1 "$SCRIPT_DIR/wt help" "wt $VERB needs a ticket id"; }
+
+# `new-change.sh --quiet` suppresses its narration and NOT its refusals; the
+# contract is unaffected either way. close-change.sh is left as it is — its
+# output is the gate's verdict, which is the answer rather than an explanation
+# of one — and is captured here so that a clean run prints only the contract.
+#
+# A scalar, not an empty array. macOS ships bash 3.2, where `"${A[@]}"` on an
+# EMPTY array is an unbound-variable error under `set -u` — verified on
+# 3.2.57 — so the close path would die before running anything. There is
+# exactly one flag and it has no spaces, so a word-split scalar is both correct
+# and the shape that cannot regress here.
+QUIET_FLAG=""
+[ "$VERB" = new ] && QUIET_FLAG="--quiet"
+
+# stderr to a file, stdout to a variable. Both, always: on success the stderr is
+# noise an agent should not have to read past, and on failure it is the
+# explanation and must not be lost. Capturing stdout is what lets a child that
+# died WITHOUT emitting a contract still be answered with one.
+ERRLOG="$(mktemp "${TMPDIR:-/tmp}/wt-XXXXXX")"
+cleanup() { rm -f "$ERRLOG"; }
+trap cleanup EXIT
+
+RC=0
+if [ "$VERBOSE" = 1 ]; then
+  # `tee` so the operator watches it live AND the failure path can still read it.
+  # shellcheck disable=SC2086
+  OUT="$("$TARGET_SCRIPT" $QUIET_FLAG "${ARGS[@]}" 2> >(tee "$ERRLOG" >&2))" || RC=$?
+else
+  # shellcheck disable=SC2086
+  OUT="$("$TARGET_SCRIPT" $QUIET_FLAG "${ARGS[@]}" 2>"$ERRLOG")" || RC=$?
+fi
+
+[ -z "$OUT" ] || printf '%s\n' "$OUT"
+
+if [ "$RC" != 0 ]; then
+  # A child that refused through `die` rather than `die_fix` has said why on
+  # stderr and named no command. Answering it with nothing would put the agent
+  # back where it started — reading prose to work out what to run — so the
+  # fallback is its last stderr line as the reason and a verbose re-run as the
+  # command. Not a good FIX, but a runnable one, and its absence is what makes
+  # a refusal expensive.
+  case "$OUT" in
+    *FAILED*) : ;;
+    *) contract_fail "$SCRIPT_DIR/$(basename "$TARGET_SCRIPT") ${ARGS[*]}" \
+         "$(command grep -v '^[[:space:]]*$' "$ERRLOG" | command tail -n 1 || printf 'exit %s' "$RC")" ;;
+  esac
+  [ "$VERBOSE" = 1 ] || {
+    printf '\n--- %s said:\n' "$(basename "$TARGET_SCRIPT")" >&2
+    command cat "$ERRLOG" >&2
+  }
+fi
+
+exit "$RC"

@@ -534,6 +534,130 @@ check "$(yesno contains "bootstrap-home.sh --root \"$NOHOME\"" "$(cat "$SCRATCH/
   "the_failure_names_a_remedy_that_actually_works" \
   "the trailing remedy does not name the PROJECT root; see $SCRATCH/newchange.log"
 
+# --------------------------------- 5b. the cheap path: `wt`, and its contract
+#
+# The output an agent acts on. `new-change.sh` closing banner was ~25 lines of
+# prose and conditional remedies, and the measured consequence was not that
+# agents read it slowly — it is that they stopped calling these scripts at all
+# and wrote their own worktree provisioning, which knows none of the rules the
+# prose exists to state.
+#
+# So the assertions here are about STDOUT and only stdout: the keys are the
+# interface (git-issue-skill#4 — this primitive may later move to `git-issue` or
+# into skill-manager, and a caller reading keys survives that move), every value
+# has to be a path or a command that runs, and a refusal has to answer with a
+# command rather than with a paragraph.
+
+step "wt: the output is the next move"
+
+CHEAP="$SCRATCH/cheap"
+mkdir -p "$CHEAP"
+git -C "$CHEAP" init -q -b main
+git -C "$CHEAP" config user.email selftest@example.invalid
+git -C "$CHEAP" config user.name "selftest"
+printf '.skill-manager/\n.claude/\n.codex/\n.gemini/\n.claude.json\n' > "$CHEAP/.gitignore"
+printf 'fixture\n' > "$CHEAP/README.md"
+git -C "$CHEAP" add -A
+git -C "$CHEAP" -c commit.gpgsign=false commit -qm "fixture"
+seed_home "$CHEAP/.skill-manager" "cheap-project-unit"
+
+NEW_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W1 ) \
+  > "$SCRATCH/wt-new.out" 2> "$SCRATCH/wt-new.err" || NEW_RC=$?
+
+# Non-vacuity before anything else: a run that failed would have an empty or
+# two-line stdout, and "no prose on stdout" would be trivially true of it.
+check "$(yesno test "$NEW_RC" = 0)" \
+  "wt_new_creates_the_worktree_and_its_home_in_one_command" \
+  "wt new exited $NEW_RC; see $SCRATCH/wt-new.err"
+
+# Every line of stdout is a contract line. This is the assertion that the ~25
+# lines of prose are gone rather than merely reordered — the clone report alone
+# was ten lines, and it reached stdout until `home clone` was redirected.
+UNKEYED=""
+CONTRACT_LINES=0
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  CONTRACT_LINES=$((CONTRACT_LINES + 1))
+  case "$line" in
+    WORKTREE*|BRANCH*|LAUNCH*|IF-EXIT-8*|CLOSE*|PROPAGATE*) : ;;
+    *) UNKEYED="${UNKEYED}      $line"$'\n' ;;
+  esac
+done < "$SCRATCH/wt-new.out"
+
+check "$(yesno test -z "$UNKEYED")" \
+  "wt_new_puts_nothing_but_the_contract_on_stdout" \
+  "these lines are on stdout and are not contract lines:
+$UNKEYED"
+check "$(yesno test "$CONTRACT_LINES" -ge 4)" \
+  "the_contract_has_the_lines_the_next_checks_read" \
+  "only $CONTRACT_LINES contract line(s); the per-key checks below would prove nothing"
+
+WT_LINE_V="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+LAUNCH_V="$(command sed -n 's/^LAUNCH  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+CLOSE_V="$(command sed -n 's/^CLOSE  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+DRIFT_V="$(command sed -n 's/^IF-EXIT-8  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+
+check "$(yesno test -d "$WT_LINE_V")" \
+  "the_contract_names_a_worktree_that_exists" \
+  "WORKTREE names '${WT_LINE_V:-<none>}', which is not a directory"
+
+# "leaves it launchable" is the requirement, so the LAUNCH value is checked as a
+# file that can be executed, not merely as a string that was printed.
+check "$(yesno executable "$LAUNCH_V")" \
+  "the_contract_names_a_launcher_that_exists_and_can_be_run" \
+  "LAUNCH names '${LAUNCH_V:-<none>}', which is not an executable file"
+check "$(yesno contains "$WT_LINE_V/" "$LAUNCH_V")" \
+  "the_launcher_is_this_worktrees_own_not_some_other_homes" \
+  "LAUNCH '$LAUNCH_V' is not inside $WT_LINE_V — an agent started with it would bind to another home"
+
+check "$(yesno executable "${CLOSE_V%% *}")" \
+  "the_contract_names_a_close_command_that_exists" \
+  "CLOSE names '${CLOSE_V:-<none>}', whose first token is not an executable file"
+check "$(yesno executable "${DRIFT_V%% *}")" \
+  "the_contract_names_a_runnable_way_out_of_the_first_launch_refusal" \
+  "IF-EXIT-8 names '${DRIFT_V:-<none>}', whose first token is not an executable file — an agent
+      that meets exit 8 without it goes back to the reference pages"
+
+# The failing half, and it must be equally tight. Re-running `new` on an
+# existing worktree used to die with "worktree path already exists" and name the
+# recovery nowhere, which is how an operator reaches for `rm -rf` and skips the
+# close-out gate entirely.
+DUP_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W1 ) \
+  > "$SCRATCH/wt-dup.out" 2> "$SCRATCH/wt-dup.err" || DUP_RC=$?
+check "$(yesno test "$DUP_RC" != 0)" \
+  "a_second_wt_new_for_the_same_ticket_fails" \
+  "it exited 0, so the checks below would be asserting against a success"
+DUP_FAILED="$(command sed -n 's/^FAILED  *//p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+DUP_FIX="$(command sed -n 's/^FIX  *//p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+check "$(yesno test -n "$DUP_FAILED")" \
+  "a_failing_run_says_what_failed_in_one_line" \
+  "no FAILED line on stdout; see $SCRATCH/wt-dup.out"
+check "$(yesno executable "${DUP_FIX%% *}")" \
+  "a_failing_run_names_one_remedy_that_is_actually_runnable" \
+  "FIX names '${DUP_FIX:-<none>}', whose first token is not an executable file"
+check "$(yesno contains "close W1" "$DUP_FIX")" \
+  "the_remedy_for_an_existing_worktree_is_the_gated_teardown" \
+  "FIX is '$DUP_FIX' — anything but `wt close` here routes the operator around the close-out gate"
+
+# And the closing half of the pair. The old trailing note printed the literal
+# string `<branch>`, so the one fact still owed after a teardown was the one the
+# operator had to go and look up.
+CLOSE_RC2=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W1 ) \
+  > "$SCRATCH/wt-close.out" 2> "$SCRATCH/wt-close.err" || CLOSE_RC2=$?
+check "$(yesno test "$CLOSE_RC2" = 0)" \
+  "wt_close_tears_the_worktree_down_in_one_command" \
+  "wt close exited $CLOSE_RC2; see $SCRATCH/wt-close.err"
+check "$(yesno absent "$WT_LINE_V")" \
+  "wt_close_actually_removed_it" \
+  "$WT_LINE_V is still there after a close that reported success"
+DELETE_V="$(command sed -n 's/^DELETE  *//p' "$SCRATCH/wt-close.out" | command sed -n 1p)"
+check "$(yesno contains "feature/W1" "$DELETE_V")" \
+  "the_closing_contract_names_the_branch_it_left_behind" \
+  "DELETE is '${DELETE_V:-<none>}' — the branch outlives the worktree, so naming it is the whole remaining move"
+
 # ------------------------- 6. the gate does not make its own CLI exec itself
 
 step "The gate runs the home's own CLI pin without wedging it"
