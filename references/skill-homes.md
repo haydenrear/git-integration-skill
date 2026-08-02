@@ -29,6 +29,22 @@ into the target repo's own `scripts/` directory. It holds no policy — it finds
 the `bootstrap-home.sh` above and `exec`s it with `--root <repo>`, so a copy of
 it is never a copy of the ordering rules.
 
+**Which copy it found is printed on every run**, because "the bootstrap ran" and
+"the bootstrap you reviewed ran" are different facts. Measured, same fixture,
+same command: the checkout's copy projected 18 of 18 skills into every agent
+home, and `~/.skill-manager`'s copy — 33 KB, predating the projection work —
+produced **empty agent homes** and exited 0. So the locator does not accept a
+candidate because the file exists. It asks each one whether `--help` names
+`--allow-unprojected`, the flag that arrived with projection support, skips the
+ones that cannot answer, and **refuses** (naming every candidate and its
+verdict) if none can. The remedy it prints is `skill-manager sync`, or
+`INTEGRATION_BOOTSTRAP_HOME=<path>/scripts/bootstrap-home.sh`, which is to this
+skill's *scripts* what `SKILL_MANAGER_CLI` is to the CLI: the only way to pin
+which copy runs. Nothing else pins them — an installed unit's scripts come from
+whichever home resolved it, and that home can be arbitrarily stale (measured
+skew on one machine: checkout `941ec20`, `~/.skill-manager` `c5abdab`, project
+home `24fe6e8`).
+
 ## Where the isolation actually comes from
 
 `SKILL_MANAGER_HOME` alone is **not** enough, and assuming it is has cost this
@@ -626,10 +642,56 @@ The global `~/.skill-manager` is never a teardown target. Nothing in this flow
 writes it; `bootstrap-home.sh` refuses outright if a target home would resolve
 to it.
 
-## Ignoring the homes (parent root only)
+## Ignoring the homes
 
-Add to the **parent root** `.gitignore` — never to a file inside a constituent
-(`INTEGRATION.md` rule 2):
+### What actually keeps the tree clean
+
+**`bootstrap-home.sh` writes a per-checkout rule into `$GIT_COMMON_DIR/info/exclude`.**
+That is the mechanism. It is not the `.gitignore` list below, and for a long time
+this page said it was.
+
+The script does not work from a list. It records the untracked top-level entries
+before it does anything, records them again afterwards, and excludes the
+difference — plus any untracked entry whose name the home machinery owns
+(`.claude*`, `.codex*`, `.gemini*`, `.skill-manager*`, read from the home's own
+descriptor, never from a literal list in the script). Whatever a run creates is
+that run's to account for, **whatever it is called**. The second rule is what
+covers the ordinary re-run, where an earlier `install` / `sync` /
+`project resolve` left a file behind before the script started.
+
+It goes in the exclude file rather than in `.gitignore` because `.gitignore` is
+**tracked**: appending to it makes the tree dirty a different way — one modified
+file instead of one untracked one — and `wt new` refuses either way until someone
+commits it. Making the script commit was built and measured, and the cost decided
+against it: **a repo nobody can commit to could not get a home.** Read-only
+checkouts, CI, and vendored third-party constituents are not edge cases in an
+integration repo, they are most of it. (Measured on the way past: three
+`selftest.sh` fixtures carried no `.gitignore` at all, and the suite went to
+71 passed / 44 failed until each was onboarded by hand. That is first contact for
+a real user.)
+
+Reading the exclude file from the **common** dir means one write covers the main
+tree and every linked worktree, and the `/`-anchored rules apply at each worktree
+root separately — which is what is wanted, since every worktree gets its own home.
+
+### The cost, said out loud
+
+**A rule in `info/exclude` is invisible to everyone else.** It makes the checkout
+in hand clean and does nothing for a teammate, a CI job, or a fresh clone — they
+all still see `?? .skill-manager` and friends. It also lives where no review will
+ever see it.
+
+And because it leaves a tree *exactly* as clean as a `.gitignore` rule does,
+`git status` cannot tell the two apart. Only `git check-ignore -v` names the
+source, which is why `selftest.sh` asserts the source by name rather than
+asserting "clean" — a check that only asserted cleanliness would pass under
+either mechanism and prove nothing about which one ran.
+
+### Recommended, not required: commit the rules too
+
+A repo whose contributors all want a clean tree should **also** carry these in a
+tracked `.gitignore`. Put them at the **parent root** — never in a file inside a
+constituent (`INTEGRATION.md` rule 2):
 
 ```gitignore
 /.skill-manager/
@@ -644,39 +706,45 @@ constituents/*/.codex/
 constituents/*/.gemini/
 ```
 
-`/.claude.json` is not covered by `/.claude/` and is a separate file: `install`
-and `sync` write claude's MCP registration to `<root>/.claude.json`, beside the
-agent directory rather than inside it. Without the rule, an onboarded repo has
-`?? .claude.json` in `git status` and the very next step — `wt new`, which
-asserts a clean tree — refuses it. (That the file is written *there at all* is a
-skill-manager defect: every launcher sets `CLAUDE_CONFIG_DIR=<root>/.claude`,
-and claude reads `$CLAUDE_CONFIG_DIR/.claude.json`. The rule above is correct
-either way, and `bootstrap-home.sh` does not depend on this list — see below.)
+This is a **recommendation**. Nothing depends on it: `bootstrap-home.sh` does not
+read this list, does not check it, and does not refuse without it. The benefit is
+that a fresh clone is clean *before* anyone runs a bootstrap, and that the rule is
+visible in review. When a rule here already covers a path, the bootstrap adds
+nothing for it — git never reports an ignored path as untracked, so it never
+reaches the exclude loop, and the two mechanisms compose rather than duplicate.
 
-**`bootstrap-home.sh` also does this for you, locally.** It lists the untracked
-top-level entries before and after its work and writes an exclude rule for
-anything it created, plus anything untracked whose name the home machinery owns
-(`.claude*`, `.codex*`, `.gemini*`, `.skill-manager*`, read from the home's
-descriptor, not from a list in the script). Those rules go in
-`$GIT_COMMON_DIR/info/exclude`, which is per-clone and appears in no diff —
-appending to the tracked `.gitignore` would make the tree dirty in a different
-way and `wt new` would refuse it just the same. The rules above are still worth
-committing: they are the shared, portable statement of the same thing, and they
-mean a fresh clone is clean before anyone runs a bootstrap.
+`/.claude.json` is in the list because `/.claude/` does not match it, and because
+skill-manager builds **before 0.20.0** wrote claude's MCP registration to
+`<root>/.claude.json`, beside the agent directory rather than inside it — which
+left `?? .claude.json` in `git status` and made `wt new` refuse a freshly
+onboarded repo. **That is fixed in the product.** Measured against
+`skill-manager 0.20.0+g651691a`: the registration goes to
+`<root>/.claude/.claude.json` (with a `.claude.json.lock` beside it), both already
+covered by `/.claude/`, and a bootstrap + install now leaves only
+`.skill-manager/`, `.claude/`, `.codex/` and `.gemini/` at a checkout root. The
+rule is kept because older builds are still in the field and it costs nothing —
+not because the defect is current.
 
-Then **prove it**, because a constituent's own `.gitignore` is more specific
-than the root's and a negated rule in it wins:
+That measurement is also the reason none of this is enumerated anywhere: the list
+was right until the product moved the file, and it will be wrong again the next
+time something new appears at a checkout root. The bootstrap will report that one;
+a list will not.
+
+If you do add them, **prove them** — a constituent's own `.gitignore` is more
+specific than the root's and a negated rule in it wins:
 
 ```bash
 git check-ignore -v .skill-manager/home.runtime.json
 for d in constituents/*/; do git check-ignore -v "$d.skill-manager/x" || echo "NOT IGNORED: $d"; done
 ```
 
-Every path must be reported as ignored. It is fine for the source to be a
-constituent's own `.gitignore` — that means it already agrees. What must never
-happen is a path reported as not ignored, or a home showing up in
-`git status`: committing a home would put another machine's absolute paths, and
-a copy of every installed unit, into the parent repo.
+Every path must be reported as ignored. **Read which file `-v` names**, because
+that is the difference between a rule the repo carries and a rule only this clone
+has: `.gitignore` (or a constituent's own, which just means it already agrees)
+means everyone gets it; `.git/info/exclude` means the bootstrap put it there and
+nobody else has it. What must never happen is a path reported as not ignored, or
+a home showing up in `git status`: committing a home would put another machine's
+absolute paths, and a copy of every installed unit, into the parent repo.
 
 **These rules cover a home, not a worktree.** A ticket worktree of a nested
 integration repo or of a constituent is a whole checkout, and no ignore rule in

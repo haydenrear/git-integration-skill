@@ -94,6 +94,10 @@ UNPROJECTED_EXIT=6
 
 ROOT=""; SOURCE=""; POLICY="live"; PRINT_ENV=0; FORCE=0; QUIET=0
 ONBOARD=0; ONBOARD_GATEWAY=0; ALLOW_EMPTY=0; NO_PROJECT=0; ALLOW_UNPROJECTED=0
+# Set when `--onboard`'s install step exits non-zero. It is a fact about what
+# this home HOLDS, so it survives to the closing banner rather than being turned
+# into an exit code on the spot — the gates below own the codes.
+ONBOARD_SHORTFALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root)      ROOT="${2:?--root needs a directory}"; shift 2 ;;
@@ -143,32 +147,53 @@ GLOBAL_HOME="$HOME/.skill-manager"
 # a clean tree, and it refused: `working tree is not clean`. Onboarding a repo
 # made the repo unusable by the next step of onboarding it.
 #
-# Fixing that by adding a fifth rule to the documented list would be the same
-# enumeration one entry longer — and it fails the moment the product moves or
-# renames the file (which it is doing: the `.claude.json` location is
-# skill-manager's own defect, being fixed there). So this is measured instead of
-# enumerated: LIST THE UNTRACKED TOP-LEVEL ENTRIES BEFORE ANY WORK, LIST THEM
-# AGAIN AFTER, AND IGNORE THE DIFFERENCE. Whatever this run created is by
-# construction this run's to ignore, whatever it is called.
+# WHAT to ignore is measured, never enumerated: LIST THE UNTRACKED TOP-LEVEL
+# ENTRIES BEFORE ANY WORK, LIST THEM AGAIN AFTER, AND IGNORE THE DIFFERENCE.
+# Whatever this run created is by construction this run's to account for,
+# whatever it is called. A hardcoded list of the four documented rules is the
+# failure this exists to catch, and a fifth entry would be the same enumeration
+# one entry longer — it fails again the moment the product moves or renames the
+# file. Which it did, in the direction that helps: as of skill-manager 0.20.0
+# the MCP registration is written to `<root>/.claude/.claude.json` (with a
+# `.claude.json.lock` beside it), both already covered by `/.claude/`, so a
+# 0.20.0 bootstrap + install now leaves only `.skill-manager/`, `.claude/`,
+# `.codex/` and `.gemini/` at the root. That is a measurement, not a guarantee,
+# and it is exactly why nothing here enumerates: the next thing the product
+# writes at a checkout root will be reported by this code and by no list.
 #
-# It goes in `$GIT_COMMON_DIR/info/exclude`, not in `.gitignore`:
+# THE RULE GOES IN `$GIT_COMMON_DIR/info/exclude`, NOT IN `.gitignore`. Both
+# candidates were built and measured; this is the one that ships, and the reason
+# is not that it is tidier:
 #
-#   * `.gitignore` is TRACKED. Appending to it to make the tree clean makes the
-#     tree dirty — one modified file instead of one untracked one — and `wt new`
-#     refuses either way until someone commits it. It cannot be the mechanism
-#     that leaves a tree clean.
-#   * the exclude file is per-clone and appears in no diff, which is exactly
-#     what a per-checkout, gitignored home is.
+#   * `.gitignore` IS TRACKED. Appending to it makes the tree dirty a different
+#     way — one modified file instead of one untracked one — and `wt new`
+#     refuses either way. To be the mechanism it would have to be COMMITTED,
+#     which is a far larger authority than "create a directory": it lands on
+#     whatever branch happens to be checked out, has no quiet undo, and would
+#     sweep up whatever else the operator had in that file. The alternative —
+#     REFUSING until someone commits the rules — was implemented and measured,
+#     and the cost decided it: A REPO NOBODY CAN COMMIT TO COULD NOT GET A HOME.
+#     Read-only checkouts, CI, and vendored third-party constituents are not
+#     edge cases in an integration repo, they are most of it. (Measured on the
+#     way past: three selftest fixtures carried no `.gitignore` at all, and the
+#     suite went to 71 passed / 44 failed until each was onboarded by hand.
+#     That is what a real user hits on first contact.)
+#   * the exclude file is per-clone and appears in no diff, so onboarding a repo
+#     never requires a commit TO that repo.
 #   * it is read from the COMMON dir, so one write covers the main tree and
 #     every linked worktree, and the `/`-anchored rules apply at each worktree
 #     root separately — which is what is wanted, since every worktree gets its
 #     own home.
 #
-# The shared, committed rules still belong in `.gitignore` for the team;
-# references/skill-homes.md says so and now lists `/.claude.json` among them.
-# This is the safety net that makes the CURRENT checkout clean without waiting
-# for that commit, and it adds nothing when `.gitignore` already covers a path,
-# because git does not report an ignored path as untracked in the first place.
+# THE COST, said plainly here and in references/skill-homes.md rather than
+# discovered: THIS RULE IS INVISIBLE TO EVERY OTHER CLONE. It makes the checkout
+# in hand clean and does nothing for a teammate, a CI job, or a fresh clone —
+# and because it leaves a tree exactly as clean as a `.gitignore` rule does,
+# `git status` cannot tell the two apart and a green "the tree is clean" check
+# says nothing about which one did it. `git check-ignore -v` names the source,
+# and that is what selftest.sh asserts. A repo whose contributors all want it
+# clean should still commit the rules to a tracked `.gitignore`; that is a
+# RECOMMENDATION, never a precondition, and this script does not depend on it.
 
 # Top-level untracked entries, one per line, directories with a trailing slash.
 # Deliberately depth-1: the unit of ignoring here is "a thing the home
@@ -200,7 +225,7 @@ git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || IGNORE=0
 # and it is the one that generalises: `.claude` and `.claude.json` are the same
 # agent's state under different suffixes, which is exactly the distinction the
 # documented four-rule `.gitignore` could not make. It also survives the file
-# moving or being renamed, which skill-manager is in the middle of doing.
+# moving or being renamed, which is what happened between 0.19 and 0.20.
 #
 # Nothing outside those prefixes is ever matched by this rule, so the widest it
 # can reach is `.claude*`, `.codex*`, `.gemini*`, `.skill-manager*` — names that
@@ -212,7 +237,24 @@ home_owned_root_prefixes() {
   done
 }
 
-# Add an exclude rule for every top-level entry this run created and left
+# Does the home machinery own this root name? Exact match on a declared
+# basename, or that basename plus a dotted suffix — `.claude` and `.claude.json`
+# are the same agent's state, which is exactly the distinction a `/`-anchored
+# directory rule cannot make, and exactly the one the four documented rules got
+# wrong. The prefixes are passed in rather than re-read, because reading them
+# costs a CLI call.
+home_owns_name() {
+  local name="${1%/}" owned="$2" prefix
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    case "$name" in "$prefix"|"$prefix".*) return 0 ;; esac
+  done <<EOF
+$owned
+EOF
+  return 1
+}
+
+# Write an exclude rule for every top-level entry this run created and left
 # untracked, and for every untracked entry the home machinery owns by name.
 # Idempotent, and silent when there is nothing to add.
 #
@@ -223,9 +265,14 @@ home_owned_root_prefixes() {
 # files are already untracked before this script starts, so "new since the
 # snapshot" is empty and the tree stays dirty. The documented onboarding
 # sequence is bootstrap-then-install, so that re-run IS the ordinary case.
+#
+# Untracked is the input on purpose. Git never reports an IGNORED path as
+# untracked, so a path a tracked `.gitignore` already covers never reaches this
+# loop and no duplicate rule is ever written — the two mechanisms compose, they
+# do not race.
 ensure_run_artifacts_ignored() {
   [ "$IGNORE" = 1 ] || return 0
-  local common excl after entry rule prefix owned added=0
+  local common excl after owned entry rule added=0
   common="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 0
   [ -n "$common" ] || return 0
   case "$common" in /*) : ;; *) common="$ROOT/$common" ;; esac
@@ -239,14 +286,7 @@ ensure_run_artifacts_ignored() {
       # Not new. Ignore it only if the home machinery owns the name; anything
       # else the operator already had untracked is theirs, and silently
       # excluding it would hide their own work.
-      local keep=1
-      while IFS= read -r prefix; do
-        [ -n "$prefix" ] || continue
-        case "${entry%/}" in "$prefix"|"$prefix".*) keep=0; break ;; esac
-      done <<INNER
-$owned
-INNER
-      [ "$keep" = 0 ] || continue
+      home_owns_name "$entry" "$owned" || continue
     fi
     rule="/$entry"
     [ -f "$excl" ] && command grep -qxF "$rule" "$excl" && continue
@@ -261,6 +301,18 @@ INNER
   done <<EOF
 $after
 EOF
+
+  # Said at the moment it happens, not only in the docs: a rule written here is
+  # a rule NOBODY ELSE GETS. Printed only when something was actually added,
+  # because on the ordinary re-run — and on a repo whose `.gitignore` already
+  # covers its home — there is nothing local to disclose.
+  if [ "$added" = 1 ]; then
+    printf '    NOTE: those rules are local to THIS clone. A teammate, a CI job or a\n' >&2
+    printf '          fresh clone still sees the home as untracked. To fix it for\n' >&2
+    printf '          everyone, commit the rules to a tracked .gitignore as well —\n' >&2
+    printf '          recommended, never required (references/skill-homes.md).\n' >&2
+  fi
+
   # Say it either way. "The tree is clean" is the property the next command
   # (`wt new`) depends on, and reporting it only when something was added makes
   # the silent case indistinguishable from the case where the check never ran.
@@ -878,11 +930,32 @@ if [ "$SKILLS_N" = 0 ] && [ "$ONBOARD" = 1 ] && [ "$frozen_skip" = 0 ]; then
     # in the same projection/binding write `sync` does, and with the agent-home
     # variables unset that write lands in the operator's ~/.claude.json.
     # shellcheck disable=SC2046
+    ONBOARD_RC=0
     env $(agent_env_words) SKILL_MANAGER_HOME="$STORE" "$CLI" onboard $ONBOARD_ARGS >&2 \
-      || die "\`onboard\` failed on $STORE. The home is wired but empty; nothing was
-  installed. Re-run the command by hand to see why:
-    $(home_env_prefix) $CLI onboard $ONBOARD_ARGS"
+      || ONBOARD_RC=$?
     SKILLS_N="$(home_skill_count)"
+    # A non-zero `onboard` used to `die` with "the home is wired but empty;
+    # nothing was installed" and exit 1. Measured: it had installed 3 units. The
+    # message was a guess about what the failure meant, the count was never
+    # looked at, and exit 1 is this script's code for a USAGE OR SETUP error —
+    # so the caller was told the wrong thing three ways at once, and the gates
+    # below, which own the accurate codes and the accurate remedies, never ran.
+    #
+    # So: say what actually landed, and let the gates decide. A home that is
+    # still empty falls to the emptiness gate (exit 5, with the remedy for an
+    # empty home); a home holding units an agent cannot reach falls to the
+    # projection gate (exit 6, with the remedy for that). Both are more
+    # accurate than a blanket 1, and neither is guessed here.
+    if [ "$ONBOARD_RC" != 0 ]; then
+      printf '  WARNING: `onboard` exited %s. It installed %s skill(s) — fewer than it\n' \
+        "$ONBOARD_RC" "$SKILLS_N" >&2
+      printf '    intended, so treat this home as INCOMPLETE however this run ends. Re-run\n' >&2
+      printf '    it by hand to see why:\n      %s %s onboard %s\n' \
+        "$(home_env_prefix)" "$CLI" "$ONBOARD_ARGS" >&2
+      # Recorded so the closing banner cannot report an unqualified success for a
+      # home whose own install step failed.
+      ONBOARD_SHORTFALL=1
+    fi
   fi
 fi
 
@@ -1175,7 +1248,9 @@ project_agent_homes() {
 project_agent_homes
 # Again, after the sync: `sync` writes <root>/.claude.json and may create other
 # root-level state, and the call above the emptiness gate ran before it existed.
-# Idempotent, so the cost of calling it twice is one `git status`.
+# Idempotent, so the cost of calling it twice is one `git status`, and calling
+# it twice is the point — the second call is the only one that can see what the
+# sync just made.
 ensure_run_artifacts_ignored
 
 # --------------------------------------------------------------- assertions
@@ -1346,8 +1421,15 @@ EOF
     # agent. The number is the projected count, not the store count: they are
     # equal here by construction, and stating the one that was measured is the
     # difference between a report and a claim.
-    [ -n "$shortfall" ] || \
+    # `--onboard`'s own install step failing is a second reason not to print it.
+    # A home can be fully projected and still be missing whatever `onboard` did
+    # not get to, and `verified` is a claim about what an agent can serve, not
+    # about what the store happens to hold.
+    if [ "$ONBOARD_SHORTFALL" = 1 ]; then
+      info "incomplete: $projected skill(s) servable, but \`onboard\` failed partway — this home holds less than it was asked to"
+    elif [ -z "$shortfall" ]; then
       info "verified:  $projected skill(s) servable — an agent launched here reads them from ${agents% }; descriptor env inside $ROOT; claude/codex resolve to this home's shims"
+    fi
   }
 }
 

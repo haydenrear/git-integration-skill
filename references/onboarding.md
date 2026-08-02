@@ -44,14 +44,25 @@ git add -A && git commit -m "scaffold compositions + markers"
 
 # 9. Give the repo its own skill-manager home, so agents working here never
 #    touch the operator's global one (see references/skill-homes.md):
-#      - add the /.skill-manager/ + constituents/*/.skill-manager/ ignore rules
-#        to the ROOT .gitignore, and prove them with `git check-ignore -v`
+#      - RECOMMENDED, not required: add the ignore rules to the ROOT .gitignore
+#        and prove them with `git check-ignore -v`. bootstrap-home.sh does NOT
+#        need them — it writes a per-checkout rule into .git/info/exclude for
+#        whatever it MEASURES a home leaving at the root, so onboarding never
+#        requires a commit to the repo being onboarded (which a read-only
+#        checkout, a CI job or a vendored constituent could not make). What
+#        committing the rules buys is that everyone ELSE who clones this repo
+#        gets a clean tree too: the exclude rule is invisible to them.
 #      - write skill-project.toml declaring the units this repo's agents need
 #      - cp $S/agent-home.sh scripts/   (the locator this skill ships), then
 #        `scripts/agent-home.sh` from the repo root is the same thing as the
 #        line below and needs to know nothing about where the skill lives
 $S/bootstrap-home.sh --root .
 ```
+
+Step 9's recommended ignore rules are listed in `references/skill-homes.md`,
+along with what the bootstrap actually writes and who does not see it.
+`agent-home.sh` prints which copy of `bootstrap-home.sh` it ran, and refuses a
+copy too old to project a home's skills into its agent directories.
 
 ## What each step guarantees
 
