@@ -92,6 +92,23 @@ same_file()    { command diff -q "$1" "$2" >/dev/null 2>&1; }
 differs_file() { ! same_file "$1" "$2"; }
 executable() { [ -n "${1:-}" ] && [ -f "$1" ] && [ -x "$1" ]; }
 yesno()     { if "$@"; then printf 1; else printf 0; fi; }
+
+# The ignore rules references/skill-homes.md prescribes, written into a fixture
+# repo before anything bootstraps a home in it.
+#
+# This is a PRECONDITION of the fixtures now, not a tidiness measure, and it is
+# the cost of making the tracked `.gitignore` the mechanism: bootstrap-home.sh
+# REFUSES (exit 7) a checkout whose `.gitignore` does not cover what a home
+# leaves at its root, and it writes no rule anywhere to repair that. A fixture
+# that skipped this would be a repo nobody had onboarded, the bootstrap would
+# refuse, and every check after it would be about a run that never happened.
+# Stated once, here, so the precondition is visible rather than copied.
+#
+# Deliberately NOT used by the cleanproj fixture: that one carries exactly the
+# four documented rules, because the refusal is what it is about.
+ignore_home_artifacts() {
+  printf '/.skill-manager/\n/.claude/\n/.claude.json\n/.codex/\n/.gemini/\n' > "$1/.gitignore"
+}
 ok()   { PASSED=$((PASSED + 1)); printf '  PASS  %s\n' "$1" >&2; }
 bad()  { FAILED=$((FAILED + 1)); printf '  FAIL  %s\n      %s\n' "$1" "$2" >&2; }
 check() { if [ "$1" = 1 ]; then ok "$2"; else bad "$2" "$3"; fi; }
@@ -175,6 +192,7 @@ mkdir -p "$PROJ"
 git -C "$PROJ" init -q -b main
 git -C "$PROJ" config user.email selftest@example.invalid
 git -C "$PROJ" config user.name "selftest"
+ignore_home_artifacts "$PROJ"
 printf 'fixture\n' > "$PROJ/README.md"
 git -C "$PROJ" add -A
 git -C "$PROJ" -c commit.gpgsign=false commit -qm "fixture"
@@ -490,6 +508,7 @@ mkdir -p "$EMPTYP"
 git -C "$EMPTYP" init -q -b main
 git -C "$EMPTYP" config user.email selftest@example.invalid
 git -C "$EMPTYP" config user.name "selftest"
+ignore_home_artifacts "$EMPTYP"
 printf 'x\n' > "$EMPTYP/README.md"
 git -C "$EMPTYP" add -A
 git -C "$EMPTYP" -c commit.gpgsign=false commit -qm "fixture"
@@ -962,6 +981,7 @@ mkdir -p "$step_scratch"
 git -C "$step_scratch" init -q -b main
 git -C "$step_scratch" config user.email selftest@example.invalid
 git -C "$step_scratch" config user.name "selftest"
+ignore_home_artifacts "$step_scratch"
 printf 'fixture\n' > "$step_scratch/README.md"
 git -C "$step_scratch" add -A
 git -C "$step_scratch" -c commit.gpgsign=false commit -qm "fixture"
@@ -1109,7 +1129,7 @@ check "$(yesno test -z "$UNKNOWN")" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
 
-# -------------------------------- onboarding leaves the working tree CLEAN
+# ---------------- onboarding leaves the tree clean, AND .gitignore is why
 #
 # Measured: after a documented bootstrap + install, `git status --porcelain`
 # read `?? .claude.json`, and the next documented step — `wt new`, which asserts
@@ -1117,13 +1137,28 @@ $UNKNOWN"
 # made it unusable by the next step of onboarding it. `/.claude/` does not match
 # `/.claude.json`, and the documented rule list had four entries.
 #
-# The property under test is the general one, not "`.claude.json` is ignored":
-# after the bootstrap, nothing the home machinery put at the root is reported by
-# git status, whatever it is called — and the operator's own untracked work is
-# still reported, because a bootstrap that silenced `git status` wholesale would
-# pass this and be far worse.
+# TWO PROPERTIES, and the second is the one that costs something to assert:
+#
+#   1. after the bootstrap, nothing the home machinery put at the root is
+#      reported by git status, whatever it is called — and the operator's own
+#      untracked work IS still reported, because a bootstrap that silenced
+#      `git status` wholesale would satisfy (1) and be far worse.
+#
+#   2. THE TRACKED `.gitignore` IS WHY. `$GIT_COMMON_DIR/info/exclude` leaves a
+#      tree exactly as clean as `.gitignore` does, so a check that asserts only
+#      "clean" passes under either and proves nothing about which mechanism is
+#      running — it reads as "the documented rules are correct" when they may
+#      not be. `git check-ignore -v` names the source file, and that is the only
+#      thing that tells the two apart. Both directions are asserted: the source
+#      IS `.gitignore` (positive), and the bootstrap left `info/exclude`
+#      byte-identical (negative, and the one the earlier mechanism fails).
+#
+# And the refusal in between, because the tracked file cannot be written by a
+# script that must also leave the tree clean: a repo whose `.gitignore` does not
+# cover a home is REFUSED, with the missing lines named, rather than silently
+# repaired somewhere no review sees.
 
-step "A bootstrapped checkout is still clean, and still shows the operator's own work"
+step "A repo whose .gitignore does not cover a home is refused, with the lines named"
 
 CLEANP="$SCRATCH/cleanproj"
 mkdir -p "$CLEANP"
@@ -1149,22 +1184,75 @@ check "$(yesno test "$(command grep -c . "$CLEANP/.gitignore")" = 4)" \
 # The artefact, planted at the root the way `install`/`sync` writes it, BEFORE
 # the bootstrap — that is the ordinary case, since the documented order is
 # bootstrap, then install. Its own non-vacuity: it must be reported as untracked
-# by the four documented rules, or "it is ignored afterwards" proves nothing.
+# by the four documented rules, or nothing below proves anything.
 printf '{"mcpServers":{"virtual-mcp-gateway":{"type":"http","url":"http://127.0.0.1:0/mcp"}}}\n' \
   > "$CLEANP/.claude.json"
 printf 'the operator was in the middle of something\n' > "$CLEANP/NOTES.md"
 git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-before.txt"
 check "$(yesno command grep -q '^?? \.claude\.json$' "$SCRATCH/clean-before.txt")" \
   "the_four_documented_rules_really_do_leave_claude_json_untracked" \
-  "the fixture's .claude.json is already ignored, so the next check would pass for the wrong reason:
+  "the fixture's .claude.json is already ignored, so every check below would pass for the wrong reason:
 $(command sed 's/^/        /' "$SCRATCH/clean-before.txt")"
+
+# The exclude file as it stands BEFORE any bootstrap runs, kept for the
+# byte-comparison further down. That comparison is the negative half of
+# property 2, so it needs a baseline taken before the mechanism could have
+# touched it.
+CLEAN_EXCL="$CLEANP/.git/info/exclude"
+mkdir -p "$CLEANP/.git/info"; : >> "$CLEAN_EXCL"
+command cp "$CLEAN_EXCL" "$SCRATCH/clean-exclude-before.txt"
 
 CLEAN_RC=0
 bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$CLEANP" \
   > "$SCRATCH/clean.log" 2>&1 || CLEAN_RC=$?
-check "$(yesno test "$CLEAN_RC" = 0)" \
-  "the_clean_tree_fixture_bootstrapped" \
-  "bootstrap exited $CLEAN_RC; the cleanliness checks would be about a run that did nothing. See $SCRATCH/clean.log"
+check "$(yesno test "$CLEAN_RC" = 7)" \
+  "a_repo_whose_gitignore_does_not_cover_a_home_is_refused" \
+  "bootstrap exited $CLEAN_RC, not 7 — it did not refuse a repo it cannot leave clean. See $SCRATCH/clean.log"
+
+# A refusal is only useful if it says what to add. The exact rule, not prose
+# about rules.
+check "$(yesno command grep -q '^    /\.claude\.json$' "$SCRATCH/clean.log")" \
+  "the_refusal_names_the_exact_gitignore_line_that_clears_it" \
+  "the refusal never printed the rule \`/.claude.json\`. See $SCRATCH/clean.log"
+
+# The negative half of property 2, asked of GIT rather than of the file: after
+# a run that refused, nothing ignores `.claude.json`. The refusal is allowed to
+# be inconvenient; it is not allowed to buy its way out by inventing a
+# per-clone rule that hides the problem from this checkout and from no other.
+# Non-vacuous by construction — the same path was asserted UNTRACKED above, so
+# "nothing ignores it" is a fact this run could have changed and did not.
+CLEAN_SRC0="$(git -C "$CLEANP" check-ignore -v --no-index -- .claude.json 2>/dev/null | command head -1 || true)"
+check "$(yesno test -z "$CLEAN_SRC0")" \
+  "the_refusing_run_did_not_make_something_else_the_source_of_the_rule" \
+  "after the refusal, git says .claude.json is ignored by: ${CLEAN_SRC0:-nothing}
+        — a per-clone rule makes THIS checkout clean and leaves the repository just as broken"
+
+# And the same thing said in bytes, because the file is the thing a future
+# reader will look at. This is the assertion that fails the moment anyone makes
+# `info/exclude` the mechanism again; it is checked on the refusing run and
+# again on the succeeding one below, because a repair could be attempted on
+# either.
+check "$(yesno same_file "$CLEAN_EXCL" "$SCRATCH/clean-exclude-before.txt")" \
+  "the_refusing_run_wrote_no_ignore_rule_into_git_info_exclude" \
+  "bootstrap-home.sh wrote into $CLEAN_EXCL instead of refusing:
+$(command diff "$SCRATCH/clean-exclude-before.txt" "$CLEAN_EXCL" | command sed 's/^/        /')"
+
+step "With the rule committed to .gitignore, the tree is clean and .gitignore is why"
+
+# The documented remedy, run exactly as the refusal prints it: add the line to
+# the TRACKED file and commit it. The commit is part of the remedy — an
+# uncommitted .gitignore is a dirty tree in its own right, which is precisely
+# why a script cannot do this half.
+printf '/.claude.json\n' >> "$CLEANP/.gitignore"
+git -C "$CLEANP" add .gitignore
+git -C "$CLEANP" -c commit.gpgsign=false commit -qm "ignore the per-checkout home"
+
+CLEAN2_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$CLEANP" \
+  > "$SCRATCH/clean2.log" 2>&1 || CLEAN2_RC=$?
+check "$(yesno test "$CLEAN2_RC" = 0)" \
+  "the_documented_remedy_actually_clears_the_refusal" \
+  "bootstrap exited $CLEAN2_RC after the documented .gitignore fix. See $SCRATCH/clean2.log"
 
 git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-after.txt"
 check "$(yesno absent_pattern '\.claude\.json' "$SCRATCH/clean-after.txt")" \
@@ -1172,8 +1260,24 @@ check "$(yesno absent_pattern '\.claude\.json' "$SCRATCH/clean-after.txt")" \
   "still reported by git status after the bootstrap:
 $(command sed 's/^/        /' "$SCRATCH/clean-after.txt")"
 
-# The other half, and it is the one that makes the check worth having: a
-# bootstrap that ignored everything would satisfy the assertion above.
+# The positive half of property 2. `check-ignore -v` prints
+# `<source>:<line>:<pattern>\t<path>`, and the source has to be the tracked
+# file. Asserted as an exact string rather than a `grep -v exclude`, so an empty
+# result — the path not ignored at all — cannot satisfy it either.
+CLEAN_SRC="$(git -C "$CLEANP" check-ignore -v --no-index -- .claude.json 2>/dev/null | command head -1 || true)"
+CLEAN_SRC="${CLEAN_SRC%%:*}"
+check "$(yesno test "$CLEAN_SRC" = ".gitignore")" \
+  "the_tracked_gitignore_is_what_makes_the_tree_clean" \
+  "git check-ignore names '${CLEAN_SRC:-nothing}' as the source of the rule that covers .claude.json, not .gitignore —
+        the tree is clean for a reason the repository does not carry, so every other clone of it is still dirty"
+
+check "$(yesno same_file "$CLEAN_EXCL" "$SCRATCH/clean-exclude-before.txt")" \
+  "the_succeeding_run_wrote_no_ignore_rule_into_git_info_exclude" \
+  "bootstrap-home.sh wrote into $CLEAN_EXCL:
+$(command diff "$SCRATCH/clean-exclude-before.txt" "$CLEAN_EXCL" | command sed 's/^/        /')"
+
+# The other half of property 1, and it is the one that makes the section worth
+# having: a bootstrap that ignored everything would satisfy every check above.
 check "$(yesno command grep -q 'NOTES.md' "$SCRATCH/clean-after.txt")" \
   "the_operators_own_untracked_work_is_still_reported" \
   "the bootstrap silenced a file it did not create — git status no longer names NOTES.md"
@@ -1288,6 +1392,167 @@ printf '%s/planted\n' "$NOSRC_HOME" >> "$SCRATCH/nosource-planted.txt"
 check "$(yesno differs_file "$NOSRC_BEFORE" "$SCRATCH/nosource-planted.txt")" \
   "the_wrote_nothing_comparison_notices_a_planted_file" \
   "the comparison called a listing with an extra entry identical, so it proves nothing"
+
+# --------------------- agent-home.sh runs a copy that can do the job, and says which
+#
+# Measured, one fixture, one command, two answers:
+#
+#   the checkout's scripts/bootstrap-home.sh   (941ec20, 71 KB)  18/18 skills
+#                                                                projected
+#   $HOME/.skill-manager's copy                (c5abdab, 33 KB)  EMPTY agent homes
+#
+# `agent-home.sh` took the second and said nothing. Its "running from the GLOBAL
+# home" note was conditional on the active home being something ELSE, and from a
+# bare shell SKILL_MANAGER_HOME is unset — so the active home IS the global home,
+# the condition was false, and the one case where the answer was wrong was the
+# one case that was silent.
+#
+# Two properties, and the second is what a weaker test would miss: the locator
+# must not run an incapable copy, AND WHICH COPY IT RAN MUST BE OBSERVABLE. A
+# check that only asserted "the bootstrap ran" passes under the defect — the
+# stale copy runs, exits 0, and prints an ordinary-looking report. So every
+# decoy here prints a MARKER naming itself, and the assertions are about which
+# marker appears.
+
+step "agent-home.sh refuses a stale bootstrap copy, and names the one it runs"
+
+LOC="$SCRATCH/locator"
+LOC_HOME="$SCRATCH/locator-home"
+LOC_GLOBAL="$LOC_HOME/.skill-manager/skills/git-integration-repo/scripts/bootstrap-home.sh"
+LOC_REPO="$LOC/scripts/bootstrap-home.sh"
+mkdir -p "$LOC/scripts" "$LOC_HOME"
+command cp "$SCRIPT_DIR/agent-home.sh" "$LOC/scripts/agent-home.sh"
+
+# A decoy bootstrap-home.sh. `$2` decides whether its `--help` names the
+# capability the locator probes for; `$3` is the marker it prints when it is
+# actually RUN. Two separate facts on purpose — "was it accepted" and "was it
+# executed" are exactly what the locator has to get right, and decoys that could
+# not be told apart would let a wrong choice through.
+make_decoy() {
+  local path="$1" capable="$2" marker="$3"
+  mkdir -p "$(dirname "$path")"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if [ "${1:-}" = --help ]; then\n'
+    printf '  printf "usage: bootstrap-home.sh [--root DIR] [--force]\\n"\n'
+    if [ "$capable" = capable ]; then
+      printf '  printf "  --allow-unprojected  accept an unprojected home\\n"\n'
+    fi
+    printf '  exit 0\nfi\n'
+    printf 'printf "RAN:%s\\n"\n' "$marker"
+  } > "$path"
+  chmod +x "$path"
+}
+
+# HOME of its own, not the suite's $FAKE_HOME: this section plants a
+# git-integration-repo skill into a global home, and doing that to the decoy
+# home the rest of the file measures would change what those checks are about.
+locbare() { env -u SKILL_MANAGER_HOME HOME="$LOC_HOME" SKILL_MANAGER_CLI="$CLI" "$@"; }
+
+# Non-vacuity of the decoys themselves, before anything is asserted with them.
+# If the "stale" one happened to name the capability, every refusal check below
+# would be measuring nothing.
+make_decoy "$LOC_GLOBAL" stale global-stale
+check "$(yesno absent_substring '--allow-unprojected' "$(bash "$LOC_GLOBAL" --help 2>&1)")" \
+  "the_stale_decoy_really_does_lack_the_capability_the_locator_probes_for" \
+  "the stale decoy's --help names --allow-unprojected, so 'it was refused' would prove nothing"
+
+LOC_STALE_RC=0
+locbare bash "$LOC/scripts/agent-home.sh" > "$SCRATCH/loc-stale.out" 2> "$SCRATCH/loc-stale.err" \
+  || LOC_STALE_RC=$?
+check "$(yesno test "$LOC_STALE_RC" != 0)" \
+  "a_locator_that_can_only_find_a_stale_bootstrap_refuses" \
+  "agent-home.sh exited 0 with nothing but a pre-projection copy to run"
+
+# The assertion that separates "refused" from "ran it and failed afterwards".
+check "$(yesno absent_pattern 'RAN:global-stale' "$SCRATCH/loc-stale.out")" \
+  "the_stale_copy_was_not_executed_only_rejected" \
+  "the stale copy RAN — a home whose agent directories would have been left empty:
+$(command sed 's/^/        /' "$SCRATCH/loc-stale.out")"
+
+check "$(yesno command grep -q 'TOO OLD' "$SCRATCH/loc-stale.err")" \
+  "the_refusal_names_the_copy_it_rejected_and_why" \
+  "the refusal does not say which candidate was too old:
+$(command sed 's/^/        /' "$SCRATCH/loc-stale.err")"
+
+check "$(yesno command grep -q 'skill-manager sync' "$SCRATCH/loc-stale.err")" \
+  "the_refusal_names_a_command_that_clears_it" \
+  "the refusal is a diagnosis with no remedy"
+
+# Now a capable copy in the same place. The bare-shell case, and the exact one
+# whose announcement used to be suppressed: SKILL_MANAGER_HOME is unset, so the
+# copy that answers is the GLOBAL home's.
+make_decoy "$LOC_GLOBAL" capable global-fresh
+LOC_G_RC=0
+locbare bash "$LOC/scripts/agent-home.sh" > "$SCRATCH/loc-global.out" 2> "$SCRATCH/loc-global.err" \
+  || LOC_G_RC=$?
+check "$(yesno command grep -q 'RAN:global-fresh' "$SCRATCH/loc-global.out")" \
+  "a_capable_installed_copy_is_used_when_the_checkout_ships_none" \
+  "agent-home.sh exited $LOC_G_RC and never reached the capable copy:
+$(command sed 's/^/        /' "$SCRATCH/loc-global.err")"
+
+check "$(yesno contains "$LOC_GLOBAL" "$(cat "$SCRATCH/loc-global.err")")" \
+  "the_run_says_which_copy_it_chose_even_from_a_bare_shell" \
+  "the copy that ran was the GLOBAL home's and stderr never named it — this is the
+        note that was conditional on the active home differing from \$HOME/.skill-manager,
+        which from a bare shell it never does:
+$(command sed 's/^/        /' "$SCRATCH/loc-global.err")"
+
+# And the ordering, with BOTH copies capable and distinguishable. This is the
+# check a "did the bootstrap run" test cannot make: both answers are a successful
+# run, and only the marker says which file produced it.
+make_decoy "$LOC_REPO" capable repo-fresh
+LOC_R_RC=0
+locbare bash "$LOC/scripts/agent-home.sh" > "$SCRATCH/loc-repo.out" 2> "$SCRATCH/loc-repo.err" \
+  || LOC_R_RC=$?
+check "$(yesno command grep -q 'RAN:repo-fresh' "$SCRATCH/loc-repo.out")" \
+  "the_checkouts_own_copy_wins_over_an_equally_capable_installed_one" \
+  "with two capable copies the locator ran the wrong one (exit $LOC_R_RC):
+$(command sed 's/^/        /' "$SCRATCH/loc-repo.out")"
+
+check "$(yesno contains "$LOC_REPO" "$(cat "$SCRATCH/loc-repo.err")")" \
+  "the_announcement_names_the_copy_that_actually_ran" \
+  "stderr does not name $LOC_REPO, so the announcement cannot be used to tell the copies apart:
+$(command sed 's/^/        /' "$SCRATCH/loc-repo.err")"
+
+# --------------------- no refusal here claims a fact it did not measure
+#
+# `--onboard`'s failure path said "The home is wired but empty; nothing was
+# installed" and exited 1. Measured: `onboard` had installed 3 units, the count
+# was never looked at, and 1 is this script's code for a USAGE OR SETUP error —
+# wrong claim, wrong number, and the gates that own the accurate codes (5 empty,
+# 6 unprojected) were skipped because the script died before reaching them.
+#
+# The property is narrow and stated as such: no script here asserts "nothing was
+# installed" in prose. What actually landed is countable, so it is counted.
+# Behavioural coverage of the shortfall path itself needs an `onboard` that fails
+# halfway, which this fixture cannot produce deterministically; this guard is
+# about the sentence, and it says so rather than implying more.
+
+step "No refusal claims 'nothing was installed' instead of counting"
+
+# The pattern's own non-vacuity, in this file's usual shape: it must match the
+# sentence that shipped, or "no script contains it" is true of any pattern.
+CLAIM_DECOY="$SCRATCH/claim-decoy.txt"
+printf 'The home is wired but empty; nothing was\n  installed. Re-run the command by hand to see why:\n' \
+  > "$CLAIM_DECOY"
+check "$(yesno command grep -q 'nothing was$' "$CLAIM_DECOY")" \
+  "the_unmeasured_claim_pattern_matches_the_sentence_that_shipped" \
+  "the pattern does not match the text it is meant to keep out, so the next check proves nothing"
+
+CLAIMERS=""
+for f in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt"; do
+  [ -f "$f" ] || continue
+  case "$(basename "$f")" in selftest.sh) continue ;; esac
+  # `if`, not `grep … && …`: under `set -e` a trailing `&&` list whose condition
+  # is false is the whole command failing, and no-match is the expected case.
+  if command grep -q 'nothing was$' "$f"; then
+    CLAIMERS="$CLAIMERS $(basename "$f")"
+  fi
+done
+check "$(yesno test -z "$CLAIMERS")" \
+  "no_script_here_claims_nothing_was_installed_without_counting" \
+  "these still assert it in prose instead of reporting the measured count:$CLAIMERS"
 
 # ------------------------------ every scripts/ file this skill names, it ships
 #

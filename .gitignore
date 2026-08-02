@@ -16,7 +16,15 @@
 # it must be safe to bootstrap in place. INTEGRATION.md rule 2 forbids the
 # reverse — putting a PARENT-only concern inside a constituent — which is not
 # what these are.
+#
+# These rules ARE the mechanism, not a convenience: bootstrap-home.sh writes no
+# ignore rule anywhere and refuses (exit 7) a checkout whose .gitignore does not
+# cover what a home leaves at its root. `/.claude.json` is here because
+# `/.claude/` does not match it and because skill-manager builds before 0.20.0
+# wrote claude's MCP registration beside the agent directory rather than inside
+# it; 0.20.0 writes `.claude/.claude.json`, which `/.claude/` already covers.
 .skill-manager/
 .claude/
+.claude.json
 .codex/
 .gemini/

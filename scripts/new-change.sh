@@ -224,6 +224,28 @@ missing links and the \`sync --skip-mcp\` that creates them, above.
 If it refuses the same way again, the sync itself is failing: run the command
 bootstrap-home.sh printed, by hand, and read what it says.
 EOF
+    # Exit 7 is "this checkout's .gitignore does not cover what a home leaves at
+    # the root". A fourth distinct remedy, and the generic one below is wrong
+    # for it twice over: the project home is fine, and re-running the bootstrap
+    # changes nothing until the rule exists. The rule lives in a TRACKED file,
+    # so the fix belongs on the BASE branch, not on this ticket's — a worktree
+    # only ever sees the `.gitignore` its own branch carries, so a fix committed
+    # here would leave every other worktree of this repo refusing the same way.
+    elif [ "$HOME_RC" = 7 ]; then
+      contract_fail "\$EDITOR $ROOT/.gitignore   # commit it on ${BASE:-the base branch}, then: $0 $TICKET${BASE:+ $BASE}" \
+        "$ROOT/.gitignore does not cover what a Skill Manager home leaves at a checkout root, so this worktree could never be clean"
+      cat >&2 <<EOF
+
+The home was created, but git reports it: this repo's .gitignore does not cover
+it, so the worktree starts dirty and every command that asserts a clean tree
+refuses. bootstrap-home.sh printed the exact lines to add, above.
+
+Put them in $ROOT/.gitignore and commit that on ${BASE:-the base branch} — a fix
+committed on this ticket's branch alone would leave every other worktree broken —
+then:
+
+  $0 $TICKET${BASE:+ $BASE}
+EOF
     else
     contract_fail "$SCRIPT_DIR/bootstrap-home.sh --root $ROOT" \
       "no Skill Manager home could be created for this worktree (usually: $ROOT has no project home yet)"

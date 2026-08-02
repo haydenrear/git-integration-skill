@@ -29,6 +29,22 @@ into the target repo's own `scripts/` directory. It holds no policy — it finds
 the `bootstrap-home.sh` above and `exec`s it with `--root <repo>`, so a copy of
 it is never a copy of the ordering rules.
 
+**Which copy it found is printed on every run**, because "the bootstrap ran" and
+"the bootstrap you reviewed ran" are different facts. Measured, same fixture,
+same command: the checkout's copy projected 18 of 18 skills into every agent
+home, and `~/.skill-manager`'s copy — 33 KB, predating the projection work —
+produced **empty agent homes** and exited 0. So the locator does not accept a
+candidate because the file exists. It asks each one whether `--help` names
+`--allow-unprojected`, the flag that arrived with projection support, skips the
+ones that cannot answer, and **refuses** (naming every candidate and its
+verdict) if none can. The remedy it prints is `skill-manager sync`, or
+`INTEGRATION_BOOTSTRAP_HOME=<path>/scripts/bootstrap-home.sh`, which is to this
+skill's *scripts* what `SKILL_MANAGER_CLI` is to the CLI: the only way to pin
+which copy runs. Nothing else pins them — an installed unit's scripts come from
+whichever home resolved it, and that home can be arbitrarily stale (measured
+skew on one machine: checkout `941ec20`, `~/.skill-manager` `c5abdab`, project
+home `24fe6e8`).
+
 ## Where the isolation actually comes from
 
 `SKILL_MANAGER_HOME` alone is **not** enough, and assuming it is has cost this
@@ -644,25 +660,47 @@ constituents/*/.codex/
 constituents/*/.gemini/
 ```
 
-`/.claude.json` is not covered by `/.claude/` and is a separate file: `install`
-and `sync` write claude's MCP registration to `<root>/.claude.json`, beside the
-agent directory rather than inside it. Without the rule, an onboarded repo has
-`?? .claude.json` in `git status` and the very next step — `wt new`, which
-asserts a clean tree — refuses it. (That the file is written *there at all* is a
-skill-manager defect: every launcher sets `CLAUDE_CONFIG_DIR=<root>/.claude`,
-and claude reads `$CLAUDE_CONFIG_DIR/.claude.json`. The rule above is correct
-either way, and `bootstrap-home.sh` does not depend on this list — see below.)
+### This list is the mechanism, and `bootstrap-home.sh` refuses without it
 
-**`bootstrap-home.sh` also does this for you, locally.** It lists the untracked
-top-level entries before and after its work and writes an exclude rule for
-anything it created, plus anything untracked whose name the home machinery owns
-(`.claude*`, `.codex*`, `.gemini*`, `.skill-manager*`, read from the home's
-descriptor, not from a list in the script). Those rules go in
-`$GIT_COMMON_DIR/info/exclude`, which is per-clone and appears in no diff —
-appending to the tracked `.gitignore` would make the tree dirty in a different
-way and `wt new` would refuse it just the same. The rules above are still worth
-committing: they are the shared, portable statement of the same thing, and they
-mean a fresh clone is clean before anyone runs a bootstrap.
+Nothing writes these rules for you. `bootstrap-home.sh` measures what a home
+actually leaves at the checkout root — it lists the untracked top-level entries
+before its work and again after, and treats the difference, plus anything
+untracked whose name the home machinery owns (`.claude*`, `.codex*`, `.gemini*`,
+`.skill-manager*`, read from the home's descriptor rather than from a list in
+the script) — and if the repository's `.gitignore` does not cover them it
+**refuses with exit 7**, printing the exact lines to add. Add them, commit them,
+re-run. The commit is part of the remedy: an uncommitted `.gitignore` is a dirty
+tree in its own right, and `wt new` refuses that just the same.
+
+It refuses rather than repairing because the two ways it could repair are both
+worse:
+
+* Appending to `.gitignore` leaves a **modified tracked file**, so the tree is
+  dirty in a different way. To be the mechanism it would have to commit, and a
+  commit lands on whatever branch is checked out — `main` during onboarding, a
+  ticket branch under `new-change.sh` — with no quiet undo.
+* Appending to `$GIT_COMMON_DIR/info/exclude` leaves the tree clean **for this
+  clone only**. The repository still ships rules that do not cover a home, so
+  every other clone, every CI checkout and every teammate hits the same thing,
+  and the rule sits where no review will ever see it. `git check-ignore -v` is
+  the only thing that distinguishes the two, because both leave the tree clean.
+
+So the cost is explicit: **a repo you cannot commit to cannot get a home** until
+someone commits these five lines to it. That is the trade — one commit, once,
+visible to everyone, instead of a per-machine rule that hides the problem from
+whoever is looking and from nobody else.
+
+`/.claude.json` is listed because `/.claude/` does not match it and because
+builds of skill-manager before **0.20.0** wrote claude's MCP registration to
+`<root>/.claude.json`, beside the agent directory rather than inside it — which
+left `?? .claude.json` in `git status` and made `wt new` refuse a freshly
+onboarded repo. That is fixed: measured against `skill-manager 0.20.0`, the
+registration is written to `<root>/.claude/.claude.json` (with a
+`.claude.json.lock` beside it), both already covered by `/.claude/`. Keep the
+rule anyway — older builds are still in the field, it costs nothing, and
+`bootstrap-home.sh` does not depend on this list being right in the first place:
+it measures, so a file this list does not anticipate is reported rather than
+missed.
 
 Then **prove it**, because a constituent's own `.gitignore` is more specific
 than the root's and a negated rule in it wins:
