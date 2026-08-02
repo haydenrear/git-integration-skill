@@ -5,7 +5,23 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 ASSETS="$SCRIPT_DIR/../assets"
 
-NAME="${1:-}"; [ -n "$NAME" ] || die "usage: init-integration.sh <name> [dir]"
+usage() {
+  cat >&2 <<'EOF'
+usage: init-integration.sh <name> [dir]
+
+  name        Name of the integration repository, written into integration.toml.
+  dir         Where to scaffold it. Default: the current directory.
+  -h, --help  This message. It is answered BEFORE anything is created — this
+              script used to take `--help` as the NAME and scaffold an
+              integration repo called `--help` into the caller's cwd.
+
+Creates integration.toml, INTEGRATION.md, a root .gitignore, constituents/ and
+.integration/, and runs `git init` if there is no repo here yet.
+EOF
+}
+help_guard "$@"
+
+NAME="${1:-}"; [ -n "$NAME" ] || { usage; die "a name is required"; }
 DIR="${2:-.}"
 mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd)"

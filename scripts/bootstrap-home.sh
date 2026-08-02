@@ -40,7 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.s
 usage() {
   cat >&2 <<'EOF'
 usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
-                         [--print-env] [--force] [--quiet]
+                         [--print-env] [--force] [--quiet] [--verbose]
                          [--onboard [--onboard-gateway]] [--allow-empty]
 
   --root DIR       Checkout to give a home to. Default: the nearest enclosing
@@ -59,7 +59,11 @@ usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
   --force          Re-run the steps on an existing live home. Never applies
                    to a frozen one, and never re-clones over an existing
                    store.
-  --quiet          Only report failures.
+  --quiet          Say nothing at all on a successful run. The log is still
+                   written; failures are still reported.
+  --verbose        Put the whole log on stderr as it happens, instead of the
+                   five-line summary. Nothing is withheld either way — a quiet
+                   run names the log file that holds all of it.
   --onboard        When the finished home has NO skills, run
                    `skill-manager onboard --skip-gateway` on it instead of
                    refusing. Only legal for a MAIN working tree: onboarding a
@@ -80,6 +84,10 @@ usage: bootstrap-home.sh [--root DIR] [--source HOME] [--policy live|frozen]
                    agent homes. Downgrades the refusal to a warning; the home is
                    never reported as verified.
 
+On success stderr carries five lines and nothing else: home, projected,
+verified, launch, log. On failure it carries a bounded tail of the log and the
+log's path. Stdout is reserved for --print-env.
+
 Exit codes: 0 ok - 1 usage/setup error - 5 the home has no skills
             6 the home's skills are not projected into its agent homes
 EOF
@@ -92,7 +100,7 @@ EMPTY_EXIT=5
 # third remedy. It used to be reported as `verified`.
 UNPROJECTED_EXIT=6
 
-ROOT=""; SOURCE=""; POLICY="live"; PRINT_ENV=0; FORCE=0; QUIET=0
+ROOT=""; SOURCE=""; POLICY="live"; PRINT_ENV=0; FORCE=0; QUIET=0; VERBOSE=0
 ONBOARD=0; ONBOARD_GATEWAY=0; ALLOW_EMPTY=0; NO_PROJECT=0; ALLOW_UNPROJECTED=0
 # Set when `--onboard`'s install step exits non-zero. It is a fact about what
 # this home HOLDS, so it survives to the closing banner rather than being turned
@@ -106,6 +114,7 @@ while [ $# -gt 0 ]; do
     --print-env) PRINT_ENV=1; shift ;;
     --force)     FORCE=1; shift ;;
     --quiet)     QUIET=1; shift ;;
+    --verbose|-v) VERBOSE=1; shift ;;
     --onboard)   ONBOARD=1; shift ;;
     --onboard-gateway) ONBOARD=1; ONBOARD_GATEWAY=1; shift ;;
     --allow-empty) ALLOW_EMPTY=1; shift ;;
@@ -117,8 +126,125 @@ while [ $# -gt 0 ]; do
 done
 case "$POLICY" in live|frozen) : ;; *) die "--policy must be live or frozen, got: $POLICY" ;; esac
 
-say() { [ "$QUIET" = 1 ] || info "$*"; }
-heading() { [ "$QUIET" = 1 ] || step "$*"; }
+# --------------------------------------------------------- what this run SAYS
+#
+# Measured before this change, on a successful bootstrap: 76 lines / 12.2 KB, of
+# which two thirds were caveats about dangling shims plus a remedy whose own text
+# said it did not repair the thing it named. An agent reading that pays ~3.1k
+# tokens per onboarding, and pays it on the run where nothing went wrong.
+#
+# The shape is the one `scripts/wt` already proved (123-line banner -> 5 lines of
+# stdout), applied to this script's stderr:
+#
+#   THE DETAIL GOES TO A LOG FILE, AND THE LOG FILE IS NAMED IN THE OUTPUT.
+#   Nothing is withheld — `log:` is one of the five lines, and everything that
+#   used to be printed is in it, in order, including every byte the CLI wrote.
+#
+#   THE EVIDENCE STAYS ON THE CONSOLE. `projected: N of M into each of …` and
+#   `verified: N skill(s) servable …` exist so that a claim about this home can be
+#   CHECKED without running anything else; demoting them would turn the report
+#   back into an assertion. They are the reason `--quiet` is a separate flag from
+#   the log: quiet is for `wt`, which prints its own contract.
+#
+#   A FAILURE STILL PRINTS. A bounded tail of the log, plus its path. See
+#   LOG_TAIL below for the bound and why it is the tail.
+#
+# The mechanism is one redirection rather than a rewrite of every call site: fd 2
+# becomes the log, so every existing `>&2` — this script's prose, its refusals,
+# and the output of every CLI child it runs — lands there without a second
+# spelling. fd 3 is the operator's real stderr, and `out` is the only thing that
+# writes to it on a successful run.
+#
+# The template ENDS in the X's and the suffix is added afterwards: BSD mktemp
+# only substitutes a trailing run of them, so `…-XXXXXX.log` is not a template at
+# all — it is a filename, the same one for every run on the machine, and two
+# concurrent bootstraps would interleave into it. Measured here, on the first
+# run: the line printed was literally `…/bootstrap-home-XXXXXX.log`.
+_LOG_TMP="${TMPDIR:-/tmp}"
+_LOG_TMP="$(mktemp "${_LOG_TMP%/}/bootstrap-home-XXXXXX")"
+LOG="$_LOG_TMP.log"
+mv "$_LOG_TMP" "$LOG"
+exec 3>&2
+if [ "$VERBOSE" = 1 ]; then
+  # `tee`, the same shape `wt --verbose` uses: the operator watches it live AND
+  # the log still exists to be named. `out` writes only to fd 2 in this mode, so
+  # the console carries ONE stream in ONE order and there is nothing to interleave.
+  exec 2> >(command tee -a "$LOG" >&3)
+else
+  exec 2>>"$LOG"
+fi
+
+# A line that belongs on the console: the evidence, and the next move.
+#
+# It goes to the log too, always and first, so the log is a complete transcript
+# rather than a transcript with the conclusion missing — which is what a caller
+# reading the log after the fact needs. Under --verbose the console copy is
+# suppressed because the log IS the console then, and printing it twice would be
+# the only duplication in the file.
+out() {
+  printf '%s\n' "$*" >&2
+  [ "$QUIET" = 1 ] || [ "$VERBOSE" = 1 ] || printf '%s\n' "$*" >&3
+}
+
+# How much of the log a failure puts on the console.
+#
+# TWENTY LINES, AND THE TAIL, NOT THE HEAD. The tail because a refusal is the
+# last thing written: the head of a failing run is the clone report or a sync
+# transcript, which is exactly the material this change exists to stop printing.
+# Twenty because the longest refusal this script hand-writes is the fresh-machine
+# "source home does not exist" at 12 lines, and the next longest — the exit-5
+# empty-home refusals — are 9; 20 carries every one of them whole, with room for
+# the line or two of context above it, and still cuts a 151-line CLI transcript.
+#
+# Printing only the path was considered and rejected: it is strictly worse than
+# today. A caller that has to open a file before it knows whether the failure was
+# "no home above this one" or "the CLI is too old" has been given a chore instead
+# of an answer.
+LOG_TAIL=20
+
+# The log line comes FIRST here and last on a successful run, and that is not an
+# inconsistency. `wt` answers a child that died without emitting a contract by
+# quoting THE LAST NON-EMPTY LINE OF ITS STDERR as the FAILED reason, so a
+# failure whose last line is a file path hands the caller a path where the reason
+# should be. The failure's own last line has to stay last.
+report_failure() {
+  local total
+  total="$(command wc -l < "$LOG" 2>/dev/null | command tr -d ' ')" || total=0
+  [ -n "$total" ] || total=0
+  if [ "$total" -gt "$LOG_TAIL" ]; then
+    printf 'log:       %s  (%s earlier line(s) omitted below)\n' "$LOG" "$((total - LOG_TAIL))" >&3
+  else
+    printf 'log:       %s\n' "$LOG" >&3
+  fi
+  command tail -n "$LOG_TAIL" "$LOG" >&3 2>/dev/null || true
+}
+
+# Set only now: everything above this line runs before fd 2 was redirected, so a
+# usage error still reports itself the ordinary way and has no log to name.
+#
+# The EXIT trap covers `die`, `die_fix`, the exit-5/6 gates and any bare `set -e`
+# failure with one rule, which is why it is a trap rather than a wrapper around
+# `die`. Verified on bash 3.2 (macOS): an EXIT trap set here does NOT fire inside
+# `$( )` subshells, so a helper that dies inside a command substitution cannot
+# make this print twice.
+on_exit() {
+  local rc=$?
+  if [ "$rc" != 0 ]; then
+    if [ "$VERBOSE" = 1 ]; then
+      printf 'log:       %s\n' "$LOG" >&3   # already on the console, in full
+    else
+      report_failure
+    fi
+  fi
+  return "$rc"
+}
+trap on_exit EXIT
+
+# The narration. Always into the log — a `--quiet` run is quiet on the console,
+# not undocumented — and onto the console only under --verbose, which fd 2 already
+# arranges.
+say() { info "$*"; }
+heading() { step "$*"; }
 
 # ------------------------------------------------------------------ paths
 
@@ -318,9 +444,8 @@ EOF
   # the silent case indistinguishable from the case where the check never ran.
   local still; still="$(git -C "$ROOT" status --porcelain 2>/dev/null | command head -5)"
   if [ -n "$still" ]; then
-    printf '  WARNING: %s is not clean after the bootstrap, so `wt new` will refuse it:\n' "$ROOT" >&2
-    printf '    %s\n' "$still" >&2
-    printf '    Commit or revert them, or add them to .gitignore.\n' >&2
+    printf '%s\n' "$still" >&2
+    out "warning:   $ROOT is not clean after the bootstrap, so \`wt new\` will refuse it (the files are in the log). Commit or revert them, or add them to .gitignore."
   else
     say "tree:      clean — nothing this run created is reported by git status"
   fi
@@ -947,11 +1072,9 @@ if [ "$SKILLS_N" = 0 ] && [ "$ONBOARD" = 1 ] && [ "$frozen_skip" = 0 ]; then
     # projection gate (exit 6, with the remedy for that). Both are more
     # accurate than a blanket 1, and neither is guessed here.
     if [ "$ONBOARD_RC" != 0 ]; then
-      printf '  WARNING: `onboard` exited %s. It installed %s skill(s) — fewer than it\n' \
-        "$ONBOARD_RC" "$SKILLS_N" >&2
-      printf '    intended, so treat this home as INCOMPLETE however this run ends. Re-run\n' >&2
-      printf '    it by hand to see why:\n      %s %s onboard %s\n' \
+      printf '  re-run it by hand to see why:\n    %s %s onboard %s\n' \
         "$(home_env_prefix)" "$CLI" "$ONBOARD_ARGS" >&2
+      out "warning:   \`onboard\` exited $ONBOARD_RC having installed $SKILLS_N skill(s) — fewer than it intended, so treat this home as INCOMPLETE however this run ends (the command to re-run it by hand is in the log)"
       # Recorded so the closing banner cannot report an unqualified success for a
       # home whose own install step failed.
       ONBOARD_SHORTFALL=1
@@ -1232,8 +1355,8 @@ project_agent_homes() {
     # did not write, for the same reason as above.
     materialize_declared_projections
     [ -n "$added" ] || break
-    printf '  WARNING: the projection sync also INSTALLED unit(s) this home did not have:\n' >&2
     printf '    %s\n' $added >&2
+    out "warning:   the projection sync also INSTALLED unit(s) this home did not have (named in the log)"
     if [ "$IS_WORKTREE" = 1 ]; then
       printf '    This is a worktree home, and every unit its project home lacks is a\n' >&2
       printf '    close-out blocker at teardown (issue #50). The cause is a project home\n' >&2
@@ -1329,11 +1452,9 @@ verify() {
   foreign="$(printf '%s\n' "$launch_path" | tr ':' '\n' \
     | grep -F '/.skill-manager/' | grep -v "^$STORE/" || true)"
   if [ -n "$foreign" ]; then
-    printf '  WARNING: another home'"'"'s bin/ survives on the launch PATH:\n' >&2
     printf '    %s\n' $foreign >&2
-    printf '    Tools resolved from there read and write that home. LaunchEnv only\n' >&2
-    printf '    prunes entries within three levels of a store root; remove it from\n' >&2
-    printf '    your shell PATH until skill-manager prunes it too.\n' >&2
+    printf '    LaunchEnv only prunes entries within three levels of a store root.\n' >&2
+    out "warning:   another home's bin/ survives on the launch PATH (named in the log); tools resolved from there read and write THAT home — remove it from your shell PATH"
   fi
 
   # Can this home SERVE a skill? Every check above is about wiring, and wiring
@@ -1381,22 +1502,25 @@ EOF
     exit "$UNPROJECTED_EXIT"
   fi
   if [ -n "$shortfall" ]; then
-    printf '  WARNING: %s of %s skill(s) are not reachable from an agent launched here\n' \
-      "$((skills - projected))" "$skills" >&2
-    printf '           (--allow-unprojected). This home is NOT verified.\n' >&2
+    out "warning:   $((skills - projected)) of $skills skill(s) are not reachable from an agent launched here (--allow-unprojected). This home is NOT verified."
   fi
 
   # Advisory, and the reason bootstrap used to disagree with `skill-manager home
   # verify`: that command REFUSES a home holding an unresolvable reference, and
   # a clone always produces some, because it skips venvs/, tools/, npm/ and
   # cache/ by design. Reported rather than fatal because the remedy `home verify`
-  # prints is NOT a fixpoint — see the closing note — so refusing here would make
-  # every honest bootstrap fail on a defect this repo cannot fix.
+  # itself prints is NOT a fixpoint (measured — see the note where that remedy
+  # used to be printed from here), so refusing would make every honest bootstrap
+  # fail on a defect this repo cannot fix.
+  #
+  # ONE LINE ON THE CONSOLE, WITH THE COUNT, and the links themselves in the log.
+  # The count is the actionable part — it is what `home verify` will refuse over —
+  # and every real home on this machine has at least one, so the list was printed
+  # on essentially every successful bootstrap. It is still printed, in the log,
+  # named by the `log:` line below.
   local dangling; dangling="$(dangling_home_links)"
-  if [ -n "$dangling" ] && [ "$QUIET" != 1 ]; then
-    printf '  WARNING: link(s) in this home do not resolve, so the tools they name\n' >&2
-    printf '           fail at exec time and `skill-manager home verify` REFUSES this\n' >&2
-    printf '           home until they do:\n' >&2
+  if [ -n "$dangling" ]; then
+    local n_dangling; n_dangling="$(printf '%s\n' "$dangling" | command grep -c . || true)"
     # One printf per line, never `printf fmt $(cmd)`: a target with a space in it
     # would be split into two bogus lines by the shell before printf ever saw it.
     while IFS= read -r entry; do
@@ -1404,33 +1528,38 @@ EOF
     done <<EOF
 $dangling
 EOF
-    printf '           See the closing note: `sync --force-scripts` re-provisions\n' >&2
-    printf '           script shims but does not recreate <home>/venvs.\n' >&2
+    out "warning:   $n_dangling link(s) in this home do not resolve (listed in the log), so the tools they name fail at exec time and \`skill-manager home verify\` REFUSES this home until they do"
   fi
 
-  [ "$QUIET" = 1 ] || {
-    local agents; agents="$(projection_dirs | while IFS= read -r d; do
-      [ -n "$d" ] && printf '%s ' "$(basename "$(dirname "$d")")"; done)"
-    info "home:      $STORE"
-    info "policy:    $policy"
-    info "descriptor:$descriptor"
-    info "shims:     $STORE/bin/launch (claude, codex, gemini)"
-    info "skills:    $skills"
-    info "projected: $projected of $skills into each of ${agents% }"
-    # Printed ONLY when every store skill is reachable from every declared
-    # agent. The number is the projected count, not the store count: they are
-    # equal here by construction, and stating the one that was measured is the
-    # difference between a report and a claim.
-    # `--onboard`'s own install step failing is a second reason not to print it.
-    # A home can be fully projected and still be missing whatever `onboard` did
-    # not get to, and `verified` is a claim about what an agent can serve, not
-    # about what the store happens to hold.
-    if [ "$ONBOARD_SHORTFALL" = 1 ]; then
-      info "incomplete: $projected skill(s) servable, but \`onboard\` failed partway — this home holds less than it was asked to"
-    elif [ -z "$shortfall" ]; then
-      info "verified:  $projected skill(s) servable — an agent launched here reads them from ${agents% }; descriptor env inside $ROOT; claude/codex resolve to this home's shims"
-    fi
-  }
+  local agents; agents="$(projection_dirs | while IFS= read -r d; do
+    [ -n "$d" ] && printf '%s ' "$(basename "$(dirname "$d")")"; done)"
+  # The facts that do not need a console line of their own: they are constant
+  # given `home:`, or they are only interesting when something is wrong, and in
+  # both cases the log is where the reader who wants them is already looking.
+  info "policy:    $policy"
+  info "descriptor:$descriptor"
+  info "shims:     $STORE/bin/launch (claude, codex, gemini)"
+  info "skills:    $skills"
+
+  out "home:      $STORE"
+  # THE EVIDENCE. Both of these lines exist so that a claim about this home can
+  # be checked rather than believed, and both were added after a `verified:` was
+  # measured over a home with nothing an agent could read. They stay on the
+  # console at any verbosity below --quiet.
+  out "projected: $projected of $skills into each of ${agents% }"
+  # Printed ONLY when every store skill is reachable from every declared
+  # agent. The number is the projected count, not the store count: they are
+  # equal here by construction, and stating the one that was measured is the
+  # difference between a report and a claim.
+  # `--onboard`'s own install step failing is a second reason not to print it.
+  # A home can be fully projected and still be missing whatever `onboard` did
+  # not get to, and `verified` is a claim about what an agent can serve, not
+  # about what the store happens to hold.
+  if [ "$ONBOARD_SHORTFALL" = 1 ]; then
+    out "incomplete: $projected skill(s) servable, but \`onboard\` failed partway — this home holds less than it was asked to"
+  elif [ -z "$shortfall" ]; then
+    out "verified:  $projected skill(s) servable — an agent launched here reads them from ${agents% }; descriptor env inside $ROOT; claude/codex resolve to this home's shims"
+  fi
 }
 
 if [ "$frozen_skip" = 1 ]; then
@@ -1449,59 +1578,64 @@ fi
 # otherwise) or on a frozen home, and in both cases the invitation to launch has
 # to carry the caveat rather than stand alone. "Verified, now launch an agent" on
 # a home with no skills is the half of #10 that is a defect under every option.
-[ "$QUIET" = 1 ] || [ "$SKILLS_N" != 0 ] || cat >&2 <<EOF
-
-This home has NO SKILLS. An agent launched against it has none of them; that is
-not a working home, it is an empty one. Install the bundled skills first:
-  $(home_env_prefix) $CLI onboard --skip-gateway
-EOF
-
-[ "$QUIET" = 1 ] || cat >&2 <<EOF
-
-Launch an agent bound to this home:
-  $STORE/bin/launch/claude
-or put the shims on PATH for this shell:
-  eval "\$($SCRIPT_DIR/bootstrap-home.sh --root $ROOT --print-env)"
-EOF
+# It replaces the `launch:` line rather than joining it: two lines that disagree
+# about whether this home is worth launching is the shape #10 shipped in.
+if [ "$SKILLS_N" = 0 ]; then
+  out "empty:     this home has NO SKILLS — an agent launched against it has none of them. Install them first: $(home_env_prefix) $CLI onboard --skip-gateway"
+else
+  # The next move, which is the whole reason a bootstrap prints anything at all.
+  out "launch:    $STORE/bin/launch/claude"
+fi
+# The other way in, for a shell rather than an agent. One reader in a hundred
+# wants it and it is a constant, so it goes where constants go.
+info "print-env: eval \"\$($SCRIPT_DIR/bootstrap-home.sh --root $ROOT --print-env)\""
 
 # Only after a clone actually ran: the caveat is about what just happened, so it
 # is gated on `cloned`, not on `bootstrapped`. See the note beside `cloned=0`.
 #
-# Two things about the sentence below were wrong, and both were printed as
-# instructions:
+# WHAT USED TO BE HERE, AND WHY IT IS DELETED RATHER THAN DEMOTED.
 #
-#   * `SKILL_MANAGER_HOME=<home> skill-manager sync --force-scripts` names ONE of
-#     the two axes. With CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_HOME unset, the
-#     binding step of that sync writes the OPERATOR'S ~/.claude.json,
-#     ~/.codex/config.toml and ~/.gemini/settings.json — measured: `ADDED claude
-#     (~/.claude.json) -> http://127.0.0.1:<port>/mcp`. That is the global-binding
-#     hijack of skill-manager#145, reached by copy-pasting a line this file
-#     printed. `home_env_prefix` pins both axes; re-measured with it, the same
-#     sync wrote only <root>/.claude.json.
+# This spot printed nine lines telling the operator to run
+# `<pinned env> skill-manager sync --force-scripts` to re-provision the shims a
+# clone left dangling, and then — in its own text, three lines later — that it
+# "does NOT recreate <home>/venvs, so a link INTO venvs/ stays dangling and
+# `skill-manager home verify` keeps refusing this home". Measured, and that is
+# why the sentence was there: `home verify` rc=1 on
+# `bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2` -> run the remedy (it
+# completes) -> `home verify` rc=1 again, identical message, <home>/venvs still
+# empty.
 #
-#   * it is not a fixpoint, and the claim that it re-provisions the reported
-#     links is false for the links that actually get reported. Measured:
-#     `home verify` rc=1 on `bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2`
-#     -> run this remedy (rc=1, but it completes its sync) -> `home verify` rc=1
-#     again, identical message, and <home>/venvs is still empty. Nothing in
-#     `sync` recreates a venv the clone deliberately skipped, so a home whose
-#     tools live in one can never pass `home verify` by following the instruction
-#     `home verify` itself prints. That belongs to skill-manager, not here; this
-#     file's job is to stop asserting a repair it cannot make.
-[ "$QUIET" = 1 ] || [ "$cloned" = 0 ] || cat >&2 <<EOF
+# A remedy that its own paragraph says does not remedy is not detail, and moving
+# it to the log would only make it cheaper to keep. What survives is the fact —
+# `warning: N link(s) in this home do not resolve …`, one line, printed by
+# verify() above with the links themselves in the log — and nothing that tells
+# anyone to run a command that will not help.
+#
+# The other half of that paragraph warned the reader off the spelling
+# `home clone` prints for itself, `SKILL_MANAGER_HOME=<home> skill-manager sync
+# --force-scripts`, whose binding step writes the OPERATOR'S ~/.claude.json with
+# the agent-home variables unset (skill-manager#145, measured: `ADDED claude
+# (~/.claude.json)`). That warning is kept, in the log, beside the line it
+# contradicts — which is where it is legible, since the line it contradicts is
+# now in the log too. Every command this script prints anywhere still goes
+# through `home_env_prefix`, which pins both axes; that is the property, and it
+# is asserted in selftest.sh rather than restated here.
+[ "$cloned" = 0 ] || cat >&2 <<EOF
 
 The home is a clone: cache/, tmp/, logs/, venvs/, tools/ and npm/ were not
-copied, so a shim whose target lived under one of those arrived dangling. Any
-such link is listed above.
+copied, so a shim whose target lived under one of those arrived dangling.
 
-Run THIS spelling, not the one \`home clone\` printed above: that one sets
-SKILL_MANAGER_HOME alone, and a sync with the agent-home variables unset writes
-the OPERATOR'S ~/.claude.json, ~/.codex/config.toml and ~/.gemini/settings.json
-(skill-manager#145).
-  $(home_env_prefix) $CLI sync --force-scripts
-re-provisions the shims it can re-derive. It does NOT recreate <home>/venvs, so
-a link INTO venvs/ stays dangling and \`skill-manager home verify\` keeps
-refusing this home — running its printed remedy does not change its verdict.
-That is a skill-manager gap, not something to keep re-running here; only the
-tools those links name are affected.
+\`home clone\` printed a remedy for that a few lines up. Do not run it as it
+stands: it sets SKILL_MANAGER_HOME alone, and a sync with the agent-home
+variables unset writes the OPERATOR'S ~/.claude.json, ~/.codex/config.toml and
+~/.gemini/settings.json (skill-manager#145). It also does not recreate
+<home>/venvs, so a link INTO venvs/ stays dangling and \`skill-manager home
+verify\` keeps refusing this home whether you run it or not. That is a
+skill-manager gap; only the tools those links name are affected.
 EOF
+
+# LAST, always. Every warning above says "in the log", and a pointer whose target
+# is named before the thing it points at is a pointer the reader has to scroll
+# back for. This is also the only line that is unconditionally true of every
+# successful run, which is what makes it the one an agent can key on.
+out "log:       $LOG"

@@ -172,6 +172,10 @@ $S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-m
 #   binding record. The run reports `projected: N of M` and prints `verified:`
 #   ONLY when N = M; a home whose skills an agent cannot read exits 6 and names
 #   every missing link. --allow-unprojected accepts one; --no-project skips it.
+#   OUTPUT: five lines on success — home / projected / verified / launch / log —
+#   with the whole transcript, this script's narration and the CLI's alike, in
+#   the file `log:` names. A failure prints a bounded tail of that file and its
+#   path. --verbose puts all of it on stderr live; --quiet prints nothing.
 $S/selftest.sh                                     # prove that pair on a disposable fixture, bare shell
 
 # --- change (the cheap path; see above) ---
@@ -191,6 +195,9 @@ $S/new-change.sh TICKET-123                        # worktree on feature/TICKET-
 #      launch from a home whose units changed until the change has been read.
 #      Read it with `<that home>/bin/cli/skill-manager home drift`, then clear
 #      it with the same command plus `--ack`. See references/skill-homes.md.
+#   ...prints the contract on stdout and ONE line on stderr: the log holding its
+#      own narration and the bootstrap's. --verbose for it live, --quiet for
+#      neither (what `wt` passes).
 #   ...edit in the worktree, commit to the feature branch...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
 

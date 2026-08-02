@@ -28,18 +28,25 @@
 # Which copy of bootstrap-home.sh it looks for, in order:
 #
 #   0. $INTEGRATION_BOOTSTRAP_HOME            an explicit pin always wins
-#   1. <repo>/scripts/bootstrap-home.sh       this repo ships the skill itself
-#                                             (true in git-integration-repo's own
-#                                             checkout, and in any repo that
+#   1. <this file's repo>/scripts/bootstrap-home.sh
+#                                             the copy shipped beside this one.
+#                                             In the documented arrangement — one
+#                                             copy in the target repo's scripts/ —
+#                                             this and rung 2 are the same path.
+#   2. <repo>/scripts/bootstrap-home.sh       the target repo ships the skill
+#                                             itself (true in git-integration-repo's
+#                                             own checkout, and in any repo that
 #                                             vendored the whole scripts/ dir)
-#   2. <repo>/constituents/git-integration-repo/scripts/bootstrap-home.sh
+#   3. <repo>/constituents/git-integration-repo/scripts/bootstrap-home.sh
 #                                             an integration repo tracking the
 #                                             skill as a constituent — the copy
 #                                             that is reviewed alongside the repo
-#   3. $SKILL_MANAGER_HOME/skills/git-integration-repo/scripts/bootstrap-home.sh
-#   4. $HOME/.skill-manager/skills/git-integration-repo/scripts/bootstrap-home.sh
+#   4. $SKILL_MANAGER_HOME/skills/git-integration-repo/scripts/bootstrap-home.sh
+#   5. $HOME/.skill-manager/skills/git-integration-repo/scripts/bootstrap-home.sh
 #
-# Rungs 3 and 4 are the installed skill, read and never written. Rung 4 is the
+# where <repo> is the CHECKOUT BEING BOOTSTRAPPED (see below), not this file's.
+#
+# Rungs 4 and 5 are the installed skill, read and never written. The last is the
 # operator's GLOBAL home and is deliberately last: on a fresh machine it is the
 # only copy that exists, and reading an implementation from it is not the
 # failure this whole mechanism exists to prevent — writing a home into it is,
@@ -93,9 +100,72 @@
 # There is no rung that resolves a skill-manager CLI, or this file, by a path
 # relative to its own location beyond the repo root above it; see selftest.sh's
 # "No script resolves a skill-manager by a path relative to itself".
+#
+# WHICH CHECKOUT GETS THE HOME IS THE CALLER'S, NOT THIS FILE'S
+# -------------------------------------------------------------
+# `--root` defaults to the CALLER'S enclosing git toplevel — the same answer
+# `scripts/wt` and `lib.sh`'s `checkout_root` give, and the one bootstrap-home.sh's
+# own `--help` documents: "the nearest enclosing git toplevel".
+#
+# It used to default to the SCRIPT'S enclosing toplevel, which is the same answer
+# only in the one arrangement this file is usually tested in: a copy sitting in
+# the target repo's own `scripts/`. Resolve it from anywhere else — which is what
+# an agent does, since the copy it reaches is the INSTALLED one under
+# `<home>/skills/git-integration-repo/scripts/` — and `--root` named the installed
+# skill directory. Measured, from a plain repo, an integration repo AND a
+# constituent, all three identical:
+#
+#   ✗ source and destination homes must not nest: <home> vs <home>/skills/git-integration-repo/.skill-manager
+#   exit 1
+#
+# The refusal is correct and load-bearing: it is what stopped a 916 MB write into
+# the operator's global home. What was wrong is the root it was asked about. Note
+# the failure is invisible from `constituents/git-integration-repo`, where the two
+# answers coincide, which is why it survived.
+#
+# The CANDIDATE SEARCH keeps its own base. "Where is a usable bootstrap-home.sh"
+# and "which checkout is being bootstrapped" are different questions with
+# different right answers: the copy beside THIS file is the one an operator
+# reviewed and the one rungs 1 and 2 have always meant, while the target is
+# wherever the caller is standing. Conflating them is the bug in mirror image —
+# it would make a repo that ships no scripts/ unable to find the implementation
+# it was invoked from.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# The directory this file was resolved from — a checkout that vendored scripts/,
+# or an installed `<home>/skills/git-integration-repo`. Used ONLY to find a
+# bootstrap-home.sh, never as the target.
+SELF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# The target. An explicit --root always wins; otherwise the caller's checkout.
+# Read out of "$@" rather than re-derived after the exec, so the refusal below
+# and the run that follows it agree about which checkout is in question.
+#
+# `--root DIR`, the two-word spelling, and only that one — because that is the
+# only spelling bootstrap-home.sh's own parser accepts, and a locator that
+# understood `--root=DIR` would resolve a target from an argument the script it
+# execs then rejects as unknown.
+ROOT=""
+_prev=""
+for _a in ${@+"$@"}; do
+  [ "$_prev" = "--root" ] && { ROOT="$_a"; break; }
+  _prev="$_a"
+done
+if [ -n "$ROOT" ]; then
+  [ -d "$ROOT" ] || { printf 'error: --root is not a directory: %s\n' "$ROOT" >&2; exit 1; }
+else
+  # `git -C .` rather than a walk: it is the same resolution checkout_root() does,
+  # and lib.sh is deliberately not sourced here — this file is copied into a repo
+  # ALONE, so anything it needs it has to carry.
+  ROOT="$(git -C . rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$ROOT" ] || {
+    printf 'error: not inside a git repository: %s\n' "$(pwd -P)" >&2
+    printf '  A home belongs to a CHECKOUT. cd into the repo you want to give one\n' >&2
+    printf '  to, or name it: %s --root <repo>\n' "$0" >&2
+    exit 1
+  }
+fi
+ROOT="$(cd "$ROOT" && pwd -P)"
 ACTIVE_HOME="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}"
 
 # The capability, spelled as the flag that came in with the projection work. It
@@ -134,10 +204,17 @@ home_label() {
 if [ -n "${INTEGRATION_BOOTSTRAP_HOME:-}" ]; then
   add_candidate "$INTEGRATION_BOOTSTRAP_HOME" 'pinned by $INTEGRATION_BOOTSTRAP_HOME'
 fi
+# Rung 1, and the ONLY rung anchored on this file's own location: the copy that
+# ships beside it. In the arrangement this file is documented for — one copy in a
+# repo's scripts/ — this IS "$ROOT/scripts/bootstrap-home.sh", so the ordering is
+# unchanged there; when the file was resolved from an installed home it is that
+# home's copy, which is the implementation the caller actually invoked.
+add_candidate "$SELF_ROOT/scripts/bootstrap-home.sh" \
+  "the copy beside this file: $SELF_ROOT"
 add_candidate "$ROOT/scripts/bootstrap-home.sh" \
-  "this checkout: $ROOT"
+  "the checkout being bootstrapped: $ROOT"
 add_candidate "$ROOT/constituents/git-integration-repo/scripts/bootstrap-home.sh" \
-  "this checkout's git-integration-repo constituent"
+  "$ROOT's git-integration-repo constituent"
 add_candidate "$ACTIVE_HOME/skills/git-integration-repo/scripts/bootstrap-home.sh" \
   "$(home_label "$ACTIVE_HOME"): $ACTIVE_HOME"
 add_candidate "$HOME/.skill-manager/skills/git-integration-repo/scripts/bootstrap-home.sh" \

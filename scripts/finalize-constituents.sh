@@ -8,6 +8,22 @@
 # Run this only AFTER `git add -A && git commit` of the onboarded files.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
+usage() {
+  cat >&2 <<'EOF'
+usage: finalize-constituents.sh
+
+  Takes no arguments. For every manifest constituent with no .git yet: git init,
+  add the remote, fetch, and reset --hard origin/<branch>.
+
+  -h, --help  This message, answered BEFORE any git init or reset.
+
+Run only AFTER `git add -A && git commit` of the onboarded files, so the parent
+index holds real blobs rather than gitlinks.
+EOF
+}
+help_guard "$@"
+[ $# -eq 0 ] || { usage; die "finalize-constituents.sh takes no arguments, got: $*"; }
+
 ROOT="$(repo_root)"; cd "$ROOT"
 
 # Guard the invariant: constituent files must already be committed to the parent.

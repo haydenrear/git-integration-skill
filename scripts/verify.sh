@@ -6,6 +6,22 @@
 #     and is NOT tracked by the parent as a gitlink (mode 160000)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
+usage() {
+  cat >&2 <<'EOF'
+usage: verify.sh
+
+  Takes no arguments. Asserts the integration repo is healthy: the parent tree
+  is clean, no gitlinks are in its index, and every manifest constituent exists
+  with its own .git and an origin remote.
+
+  -h, --help  This message.
+
+Exit codes: 0 healthy - 1 something above failed
+EOF
+}
+help_guard "$@"
+[ $# -eq 0 ] || { usage; die "verify.sh takes no arguments, got: $*"; }
+
 ROOT="$(repo_root)"; cd "$ROOT"
 fail=0
 
