@@ -251,9 +251,15 @@ check "$(yesno contains "1 skill(s) servable" "$VERIFIED_LINE")" \
 # The dangling shim the fixture seeded. `skill-manager home verify` refuses this
 # home for it; bootstrap must at minimum SAY so, or the two disagree and the
 # operator believes the one that ran.
-check "$(yesno command grep -q 'bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2' "$SCRATCH/bootstrap.log")" \
-  "a_link_that_does_not_resolve_in_the_new_home_is_named" \
-  "the clone skipped venvs/ and the resulting dangling shim was never mentioned; see $SCRATCH/bootstrap.log"
+#
+# Asserted against the --force log, NOT the clone log. On the clone path `home
+# clone` prints the same link itself, so a check reading that log passes whether
+# or not bootstrap says anything — measured while writing this, by reverting the
+# report and watching the check stay green. --force runs no clone, so the only
+# thing that can name the link there is bootstrap's own verify().
+check "$(yesno command grep -q 'bin/cli/jinja2 -> ../../venvs/jinja2-cli/bin/jinja2' "$SCRATCH/bootstrap-force.log")" \
+  "a_link_that_does_not_resolve_in_the_home_is_named_even_with_no_clone_report" \
+  "verify() did not name the dangling shim on a run that printed no clone report (rc=$FORCE_RC); see $SCRATCH/bootstrap-force.log"
 
 # The remedy the caveat prints is a command an operator copy-pastes, and run as
 # it used to be spelled — SKILL_MANAGER_HOME alone — its binding step writes the
