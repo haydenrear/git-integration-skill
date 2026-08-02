@@ -1264,7 +1264,7 @@ $(command sed 's/^/        /' "$SCRATCH/wt-block.out")
 $(command sed 's/^/        /' "$SCRATCH/wt-block.err")"
 check "$(yesno contains "home sync" "$BLOCK_FIX")" \
   "the_remedy_on_a_refused_close_is_the_blockers_own_not_force" \
-  "fix is '${BLOCK_FIX:-<none>}' — `--force` is always true and is the one that DESTROYS the work,
+  "fix is '${BLOCK_FIX:-<none>}' — --force is always true and is the one that DESTROYS the work,
       so a refusal that leads with it teaches the operator to discard"
 # And the gate's transcript — the list of what would be lost — is not gone, it
 # is in the file the third line names. Named-and-empty is the failure this pair
@@ -2343,6 +2343,237 @@ check "$(yesno command grep -q 'no skill-manager CLI' "$REL_ROOT/child.log")" \
   "the_refusal_names_the_variable_that_fixes_it" \
   "expected the SKILL_MANAGER_CLI refusal; got:
 $(command sed 's/^/        /' "$REL_ROOT/child.log" 2>/dev/null | command tail -5)"
+
+# ------------- a run you can WAIT ON, and a close that runs from anywhere
+#
+# Four defects, measured by fresh agents against this skill, all of which cost
+# ROUND-TRIPS rather than output:
+#
+#   * `wt new` prints nothing until it finishes, and it can run longer than a
+#     caller's foreground timeout — so the caller backgrounds it and POLLS, and
+#     each poll re-sends the whole growing transcript. Measured at ~14k of one
+#     agent's ~48k total. The fix is a run that can be WAITED on: a caller-named
+#     transcript (--log) and one line naming it once the run is slow enough to
+#     need it.
+#   * `wt close <TICKET>` composed the worktree path out of whatever repo $PWD
+#     was in, so the close command the contract prints — a bare absolute path
+#     with no `cd` — failed from anywhere else with `not a directory: …`.
+#   * every printed invocation must be runnable AS PRINTED, and `wt` is not on
+#     PATH.
+#   * a successful close said nothing about where the home work went or what it
+#     still owed (git-integration-skill#8).
+#
+# The fixture reuses $CHEAP, and every check below pairs its budget with the
+# evidence, for the reason stated throughout this file: a script that printed
+# nothing at all satisfies a line count perfectly.
+
+step "wt: a run you can wait on, and a close that is not cwd-sensitive"
+
+# ---- --log: the CALLER names the transcript, before the run starts.
+#
+# This is what makes the run watchable at all. Without it the transcript path is
+# chosen by mktemp inside a child that prints nothing until it is done, so there
+# is nothing to tail and the only way to wait is to poll.
+NAMED_RUN="$SCRATCH/named-run.log"
+NL_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/new-change.sh" WL1 --log "$NAMED_RUN" ) \
+  > "$SCRATCH/nc-named.out" 2> "$SCRATCH/nc-named.err" || NL_RC=$?
+log_flag_is_honoured() {
+  [ "$NL_RC" = 0 ] || return 1
+  [ -s "$NAMED_RUN" ] || return 1
+  command grep -q 'Repository for WL1' "$NAMED_RUN" || return 1
+  # bootstrap-home.sh's narration lands in the SAME file, which is the property
+  # that makes one tail enough to watch the whole provisioning.
+  command grep -q '^verified: ' "$NAMED_RUN"
+}
+check "$(yesno log_flag_is_honoured)" \
+  "--log_puts_this_scripts_AND_the_bootstraps_narration_in_the_file_the_caller_named" \
+  "rc=$NL_RC, $NAMED_RUN is $(command wc -c < "$NAMED_RUN" 2>/dev/null | command tr -d ' ') byte(s):
+$(command sed 's/^/        /' "$NAMED_RUN" 2>/dev/null | command tail -5)"
+
+# ---- the progress line, on a run slow enough to need one.
+#
+# WT_PROGRESS_AFTER=1 makes it deterministic; the default is 25 s, which is why
+# the plain `wt new` above still prints NOTHING on stderr and that check still
+# holds. Both halves asserted together: the line must name a file that EXISTS
+# and HOLDS THE NARRATION, because a `wt` that printed a plausible sentence
+# about a path it never wrote would pass a grep for the sentence.
+PROG_RC=0
+( cd "$CHEAP" && bare env WT_PROGRESS_AFTER=1 bash "$SCRIPT_DIR/wt" new WL2 ) \
+  > "$SCRATCH/wt-prog.out" 2> "$SCRATCH/wt-prog.err" || PROG_RC=$?
+PROG_LOG="$(command sed -n 's/.*watch: tail -f //p' "$SCRATCH/wt-prog.err" | command sed -n 1p)"
+PROG_WT="$(command sed -n 's/^created worktree //p' "$SCRATCH/wt-prog.out" | command sed -n 1p)"
+progress_line_names_a_log_that_holds_the_run() {
+  [ "$PROG_RC" = 0 ] || return 1
+  # The stdout contract is UNTOUCHED by any of this: still one line, still the
+  # path, and the path is still a directory that exists.
+  [ "$(lines_of "$SCRATCH/wt-prog.out")" = 1 ] || return 1
+  [ -n "$PROG_WT" ] && [ -d "$PROG_WT" ] || return 1
+  # And the whole of stderr is that one line.
+  [ "$(lines_of "$SCRATCH/wt-prog.err")" = 1 ] || return 1
+  [ -n "$PROG_LOG" ] && [ -s "$PROG_LOG" ] || return 1
+  command grep -q 'Repository for WL2' "$PROG_LOG"
+}
+check "$(yesno progress_line_names_a_log_that_holds_the_run)" \
+  "a_slow_wt_new_names_a_log_to_tail_AND_still_costs_one_line_of_stdout" \
+  "rc=$PROG_RC, stdout $(lines_of "$SCRATCH/wt-prog.out") line(s), stderr $(lines_of "$SCRATCH/wt-prog.err") line(s),
+      worktree '${PROG_WT:-<none>}', named log '${PROG_LOG:-<none>}'
+      (exists: $(yesno test -s "${PROG_LOG:-/nonexistent}")). stderr was:
+$(command sed 's/^/        /' "$SCRATCH/wt-prog.err")"
+
+# ---- CLOSING FROM SOMEWHERE ELSE ENTIRELY.
+#
+# $PROJ is a different repository in the same parent directory, which is the
+# exact shape that failed: `ticket_worktree_path` would answer
+# $SCRATCH/proj-WL2, that does not exist, and the old code refused there —
+# reporting a missing ticket when what was wrong was the directory.
+XCLOSE_RC=0
+( cd "$PROJ" && bare bash "$SCRIPT_DIR/wt" close WL2 ) \
+  > "$SCRATCH/wt-xclose.out" 2> "$SCRATCH/wt-xclose.err" || XCLOSE_RC=$?
+XCLOSE_LINE="$(command sed -n 1p "$SCRATCH/wt-xclose.out")"
+closed_from_an_unrelated_repo() {
+  [ "$XCLOSE_RC" = 0 ] || return 1
+  # It really removed the worktree that belongs to the OTHER repo, rather than
+  # exiting 0 having found nothing to do.
+  [ -n "$PROG_WT" ] && [ ! -d "$PROG_WT" ] || return 1
+  contains "$PROG_WT" "$XCLOSE_LINE"
+}
+check "$(yesno closed_from_an_unrelated_repo)" \
+  "wt_close_resolves_a_ticket_from_a_directory_in_a_completely_different_repo" \
+  "rc=$XCLOSE_RC from inside $PROJ; worktree '${PROG_WT:-<none>}' still present: $(yesno test -d "${PROG_WT:-/nonexistent}").
+      stdout: $XCLOSE_LINE
+      stderr:
+$(command sed 's/^/        /' "$SCRATCH/wt-xclose.err" | command tail -5)"
+
+# ---- THE LAST MILE, on the one line.
+#
+# `home sync` moves a worktree's unit work ONE TIER UP — into this checkout's
+# own home — and no further. Both fresh agents noticed the gap unprompted: after
+# a close the edit is in one place, a later reinstall can overwrite it, and no
+# other checkout sees it. The close is the moment that becomes invisible (the
+# home is gone and the loss is in no diff), so it is the moment that has to say
+# so. Budget and evidence together again: still ONE line, and the fact is on it.
+close_one_line_states_where_the_home_work_went() {
+  [ "$(lines_of "$SCRATCH/wt-xclose.out")" = 1 ] || return 1
+  contains "$CHEAP/.skill-manager" "$XCLOSE_LINE" || return 1
+  contains "push skill edits" "$XCLOSE_LINE"
+}
+check "$(yesno close_one_line_states_where_the_home_work_went)" \
+  "a_successful_close_says_where_the_home_work_now_lives_and_what_it_still_owes" \
+  "the one line was:
+      $XCLOSE_LINE
+      it must name $CHEAP/.skill-manager — one tier up, and no further — and say the
+      push to the skill's own repo is still owed (git-integration-skill#8)"
+
+# And the same fact as a CONTRACT KEY, since the keys are the interface and the
+# one-line summary is prose. Run directly, and from $PROJ again.
+KEY_RC=0
+( cd "$PROJ" && bare bash "$SCRIPT_DIR/close-change.sh" WL1 ) \
+  > "$SCRATCH/cc-key.out" 2> "$SCRATCH/cc-key.err" || KEY_RC=$?
+HOMEWORK_V="$(command sed -n 's/^HOME-WORK  *//p' "$SCRATCH/cc-key.out" | command sed -n 1p)"
+home_work_key_names_the_project_home() {
+  [ "$KEY_RC" = 0 ] || return 1
+  [ -n "$HOMEWORK_V" ] || return 1
+  case "$HOMEWORK_V" in "$CHEAP/.skill-manager"*) : ;; *) return 1 ;; esac
+  contains "OWN repository" "$HOMEWORK_V"
+}
+check "$(yesno home_work_key_names_the_project_home)" \
+  "close_change_emits_a_HOME_WORK_key_whose_value_is_the_project_home" \
+  "rc=$KEY_RC, HOME-WORK is '${HOMEWORK_V:-<none>}', expected it to start with $CHEAP/.skill-manager.
+      stdout:
+$(command sed 's/^/        /' "$SCRATCH/cc-key.out")"
+
+# ---- and it is not CLAIMED when there was nothing to reconcile.
+#
+# A --no-home worktree reconciled nothing anywhere, and a key saying its work
+# reached the project home would be the same class of defect as `verified` over
+# an empty home: a true-sounding sentence about something that did not happen.
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/new-change.sh" WL5 --no-home ) \
+  > "$SCRATCH/nc-nohome.out" 2> "$SCRATCH/nc-nohome.err" || true
+NOHOME_RC=0
+( cd "$PROJ" && bare bash "$SCRIPT_DIR/close-change.sh" WL5 ) \
+  > "$SCRATCH/cc-nohome.out" 2> "$SCRATCH/cc-nohome.err" || NOHOME_RC=$?
+nohome_close_claims_nothing_about_a_home_it_never_had() {
+  [ "$NOHOME_RC" = 0 ] || return 1
+  command grep -q '^CLOSED ' "$SCRATCH/cc-nohome.out" || return 1
+  ! command grep -q '^HOME-WORK ' "$SCRATCH/cc-nohome.out"
+}
+check "$(yesno nohome_close_claims_nothing_about_a_home_it_never_had)" \
+  "a_no_home_worktree_closes_without_claiming_its_work_reached_a_project_home" \
+  "rc=$NOHOME_RC; stdout was:
+$(command sed 's/^/        /' "$SCRATCH/cc-nohome.out")"
+
+# ---- ambiguity is NAMED, never guessed.
+#
+# Two repos under one integration root may legitimately carry the same ticket
+# id, and closing the wrong one destroys a home. Fabricated rather than
+# bootstrapped: the resolver's test for "is this a linked worktree" is that
+# `.git` is a FILE, and two such directories are all this needs.
+mkdir -p "$SCRATCH/aaa-WL9" "$SCRATCH/bbb-WL9"
+printf 'gitdir: /nonexistent\n' > "$SCRATCH/aaa-WL9/.git"
+printf 'gitdir: /nonexistent\n' > "$SCRATCH/bbb-WL9/.git"
+AMBIG_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close WL9 ) \
+  > "$SCRATCH/wt-ambig.out" 2> "$SCRATCH/wt-ambig.err" || AMBIG_RC=$?
+AMBIG_REASON="$(command sed -n 's/^error closing worktree: //p' "$SCRATCH/wt-ambig.out" | command sed -n 1p)"
+ambiguity_is_refused_and_named() {
+  [ "$AMBIG_RC" != 0 ] || return 1
+  contains "WL9" "$AMBIG_REASON" || return 1
+  contains "2 worktrees" "$AMBIG_REASON"
+}
+check "$(yesno ambiguity_is_refused_and_named)" \
+  "two_worktrees_with_the_same_ticket_id_are_reported_not_guessed_between" \
+  "rc=$AMBIG_RC, reason '${AMBIG_REASON:-<none>}'; stdout:
+$(command sed 's/^/        /' "$SCRATCH/wt-ambig.out")"
+
+# ---- every invocation this skill PRINTS is runnable AS PRINTED.
+#
+# `wt` is not on PATH and never has been, and the pages told an agent to run
+# `wt close TICKET-123`. It has been broken four times, so it is asserted rather
+# than remembered: no line in the shipped documentation may BEGIN with a bare
+# `wt <verb>`. Mid-sentence prose about `wt new` is fine and is not an
+# instruction; a line that starts with one is.
+BARE_WT="$(command grep -nE '^[[:space:]]*wt[[:space:]]+(new|close|info)([[:space:]]|$)' \
+  "$SCRIPT_DIR/../SKILL.md" "$SCRIPT_DIR/../references/worktrees.md" 2>/dev/null || true)"
+check "$(yesno test -z "$BARE_WT")" \
+  "no_documented_line_starts_with_a_bare_wt_which_is_not_on_PATH" \
+  "these lines would not run as printed:
+$(printf '%s\n' "$BARE_WT" | command sed 's/^/        /')"
+
+# And the runtime half of the same rule: the CLOSE key `wt info` prints has to
+# name a file that exists and is executable — and `info`, like `close`, has to
+# answer from a directory in another repo entirely.
+#
+# `info` is run FROM $PROJ, not from $CHEAP. It carried the identical
+# cwd-sensitivity — `no worktree for T4 at <the wrong repo>-T4`, measured — and
+# it is the command an agent reaches for when it has only the ticket id, which
+# is exactly when it is least likely to be standing in the right repo. Both
+# verbs now resolve through the same helper, so they cannot answer about
+# different worktrees.
+INFO2_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new WL6 --no-home ) >/dev/null 2>&1 || true
+( cd "$PROJ" && bare bash "$SCRIPT_DIR/wt" info WL6 ) \
+  > "$SCRATCH/wt-info2.out" 2> "$SCRATCH/wt-info2.err" || INFO2_RC=$?
+CLOSE2_V="$(command sed -n 's/^CLOSE  *//p' "$SCRATCH/wt-info2.out" | command sed -n 1p)"
+INFO2_WT="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-info2.out" | command sed -n 1p)"
+close_key_is_an_absolute_runnable_path() {
+  [ "$INFO2_RC" = 0 ] || return 1
+  # Non-vacuity: it really answered about the OTHER repo's worktree.
+  [ "$INFO2_WT" = "$SCRATCH/cheap-WL6" ] || return 1
+  [ -n "$CLOSE2_V" ] || return 1
+  case "$CLOSE2_V" in /*) : ;; *) return 1 ;; esac
+  [ -x "${CLOSE2_V%% *}" ]
+}
+check "$(yesno close_key_is_an_absolute_runnable_path)" \
+  "wt_info_answers_from_another_repo_AND_its_CLOSE_key_is_an_executable_path" \
+  "rc=$INFO2_RC from inside $PROJ; WORKTREE is '${INFO2_WT:-<none>}' (expected $SCRATCH/cheap-WL6),
+      CLOSE is '${CLOSE2_V:-<none>}'; its first token must be an executable file"
+# And it runs AS PRINTED, from a directory that is not the repo it belongs to.
+AS_PRINTED_RC=0
+( cd "$PROJ" && bare bash -c "$CLOSE2_V" ) >/dev/null 2>&1 || AS_PRINTED_RC=$?
+check "$(yesno test "$AS_PRINTED_RC" = 0)" \
+  "the_CLOSE_line_runs_verbatim_from_an_unrelated_directory" \
+  "running '$CLOSE2_V' from $PROJ exited $AS_PRINTED_RC"
 
 # ------------------------------------------------------------------- verdict
 

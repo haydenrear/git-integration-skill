@@ -247,6 +247,40 @@ ticket_worktree_path() {
   printf '%s/%s-%s\n' "$(worktree_parent_dir "$root")" "$(basename "$root")" "$ticket"
 }
 
+# Every ticket worktree named <TICKET>, found by looking WHERE TICKET WORKTREES
+# GO rather than by asking the repo the caller happens to be standing in. One
+# physical path per line; empty when there is none.
+#
+# This exists because `close-change.sh <TICKET>` was CWD-SENSITIVE and said so
+# only by accident. `ticket_worktree_path` is `<parent>/<basename repo>-<TICKET>`,
+# and the repo is the nearest git toplevel to $PWD — so running the close command
+# the contract prints, from anywhere but the repo that opened the worktree, built
+# a path out of the WRONG repo's basename and refused with `not a directory:
+# /Users/…/skill-manager-B1-EDIT`. Measured in an eval; it cost a failed call and
+# reads as "that ticket does not exist" rather than "you are in the wrong
+# directory".
+#
+# The ticket half of the name is exact and the repo half is the unknown, so the
+# search is over the repo half: `<parent>/*-<TICKET>`. $parent is
+# `worktree_parent_dir`'s answer, which is where new-change.sh puts every ticket
+# worktree for every repo under one integration root — so the sibling checkouts
+# of unrelated repos are all in scope, which is the case that failed.
+#
+# A LINKED WORKTREE'S `.git` IS A FILE, and an ordinary clone's is a directory.
+# That is the whole test: it keeps a coincidentally-named plain directory, or a
+# separate clone called `foo-B1-EDIT`, out of the answer without consulting any
+# repo's `worktree list` — which cannot be consulted, since which repo to ask is
+# precisely the unknown.
+ticket_worktree_candidates() {
+  local parent="$1" ticket="$2" c
+  [ -d "$parent" ] || return 0
+  for c in "$parent"/*-"$ticket"; do
+    [ -d "$c" ] || continue
+    [ -f "$c/.git" ] || continue
+    (cd "$c" && pwd -P)
+  done
+}
+
 # Refuse a worktree path that lands inside an integration repo's working tree.
 # worktree_parent_dir already avoids it; this is the assertion that turns any
 # future mistake — or a hand-passed path — into a loud failure instead of a

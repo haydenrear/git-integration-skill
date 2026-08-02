@@ -657,7 +657,31 @@ home_policy() { "$CLI" home policy --home "$STORE" 2>/dev/null | awk '/^policy:/
 # The agent-home directories this home declares. Read from the descriptor
 # (HomeDescriptor.envFor) rather than hardcoded here, so this script cannot
 # create `.claude` in a place the launcher will not look.
-descriptor_env_dirs() {
+#
+# ASKED ONCE PER RUN, and that is the single largest saving this script has ever
+# made. Measured on a `wt new` against an 18-unit / 852 MB home, before this
+# cache: 151.7 s wall clock, of which ~100 s was this function.
+#
+# It is a JVM start (~1.4 s), and it was called from inside PER-UNIT LOOPS.
+# `unprojected_pairs` and `projected_unit_count` both iterate the store's units
+# and, for each one, expand `$(projection_dirs)` — a command substitution, so a
+# fresh subshell, so a fresh JVM — 18 units x 1.4 s = 25 s per call, and there
+# are four such calls in a bootstrap (the projection guard, the re-check after
+# materializing, and both counters in verify()). Nothing about the answer varies
+# across them: it is a pure function of $STORE and $ROOT, neither of which
+# changes after the clone.
+#
+# A memo assigned INSIDE the function would not have helped, and that is the
+# whole reason this is shaped as an explicit prime: the assignment would happen
+# in the `$( )` subshell and be discarded with it, so every iteration would miss
+# the cache. `prime_env_dirs` is therefore called from TOP-LEVEL statements only,
+# where the assignment survives.
+#
+# Empty is never cached: an empty answer means the descriptor could not be read
+# (the `2>/dev/null` swallows why), and caching that would turn a transient
+# failure into a permanent one for the rest of the run.
+ENV_DIRS_CACHE=""
+_descriptor_env_dirs_uncached() {
   "$CLI" home describe --home "$STORE" --home-root "$ROOT" --json 2>/dev/null | "$PY" -c '
 import json, sys
 try:
@@ -670,6 +694,15 @@ for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME"):
     if value:
         print(value)
 '
+}
+prime_env_dirs() {
+  [ -z "$ENV_DIRS_CACHE" ] || return 0
+  ENV_DIRS_CACHE="$(_descriptor_env_dirs_uncached)"
+  return 0
+}
+descriptor_env_dirs() {
+  if [ -n "$ENV_DIRS_CACHE" ]; then printf '%s\n' "$ENV_DIRS_CACHE"; return 0; fi
+  _descriptor_env_dirs_uncached
 }
 
 # The agent-home env as `NAME=VALUE` words, ready to hand to `env`. Any command
@@ -1026,6 +1059,11 @@ if [ "$bootstrapped" = 0 ]; then
 
   # 4. Agent homes, at the paths the descriptor names — not at paths this
   #    script decides. HomeDescriptor.envFor owns that layout.
+  #
+  #    Primed here, at top level, so the ONE JVM start this answer costs is
+  #    spent on the first use rather than on each of the ~70 later ones. See the
+  #    note on descriptor_env_dirs.
+  prime_env_dirs
   descriptor_env_dirs | while IFS= read -r dir; do [ -n "$dir" ] && mkdir -p "$dir"; done
 
   # 5. Launcher shims AND the CLI pin — one command writes both, and since #61
@@ -1053,6 +1091,12 @@ if [ "$bootstrapped" = 0 ]; then
 fi
 
 export SKILL_MANAGER_HOME="$STORE"
+
+# And on the paths that skipped the clone block — an already-bootstrapped home,
+# --force, a frozen home. Top level, for the reason given at prime_env_dirs:
+# an assignment made inside a `$( )` is made in a subshell and lost, and every
+# remaining caller reaches this function through one.
+prime_env_dirs
 
 # Check — and where it is this script's business, repair — an ALREADY-bootstrapped
 # home too. Homes provisioned before #61 carry the PATH-resolving shim and

@@ -70,7 +70,20 @@ usage: new-change.sh <TICKET> [base-branch] [--integration] [--no-home]
                   line naming it.
   --info          Print the contract for a worktree that ALREADY exists, and
                   create nothing. `wt info <TICKET>` is this.
+  --log FILE      Write the narration to FILE instead of a fresh temp file. The
+                  file is created if absent and APPENDED to, so a caller that
+                  wants to tail the run can name a path before starting it —
+                  which is what `wt` does.
   -h, --help      This message.
+
+HOW LONG IT TAKES. Almost all of it is the Skill Manager home, and the cost
+scales with the SOURCE HOME, not with the repo. Measured on this machine
+against an 18-unit / 852 MB project home: 48 s, of which ~34 s is
+`skill-manager home clone` (28.7 s of that copying 40307 files) and ~14 s is
+the eight further CLI starts. A 1-unit home is a few seconds. It was 152 s
+before the descriptor read was hoisted out of the per-unit loops. Nothing is
+printed until it finishes, so if you expect to wait: pass --verbose, or tail
+the file --log names.
 
 Stdout is the contract and nothing else: WORKTREE / BRANCH / LAUNCH / IF-EXIT-8
 / CLOSE (/ PROPAGATE) on success, FAILED / FIX on failure. Stderr on a
@@ -81,7 +94,7 @@ EOF
 }
 
 TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0
-QUIET=0; VERBOSE=0; INFO=0
+QUIET=0; VERBOSE=0; INFO=0; LOG_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-home)     SKIP_HOME=1; shift ;;
@@ -89,6 +102,7 @@ while [ $# -gt 0 ]; do
     --quiet)       QUIET=1; shift ;;
     --verbose|-v)  VERBOSE=1; shift ;;
     --info)        INFO=1; shift ;;
+    --log)         LOG_ARG="${2:?--log needs a file path}"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     -*)            usage; die "unknown option: $1" ;;
     *)             if [ -z "$TICKET" ]; then TICKET="$1"; elif [ -z "$BASE" ]; then BASE="$1";
@@ -112,10 +126,27 @@ done
 #
 # --quiet is unchanged in meaning and is what `wt` passes: nothing on stderr at
 # all, because `wt` prints its own contract and captures this one.
-_LOG_TMP="${TMPDIR:-/tmp}"
-_LOG_TMP="$(mktemp "${_LOG_TMP%/}/new-change-XXXXXX")"
-LOG="$_LOG_TMP.log"
-mv "$_LOG_TMP" "$LOG"
+#
+# --log names it instead. That is what makes a run WATCHABLE: this script prints
+# nothing until it is finished — the contract is emitted atomically at the end —
+# and on a large source home it runs for the best part of a minute, which is
+# long enough that a caller under a foreground timeout has to background it and
+# then poll. Polling an agent's own transcript re-sends the whole transcript
+# every time; `tail -f` on a named file does not. So the caller is allowed to
+# choose the file BEFORE the run starts, and `wt` does exactly that.
+#
+# Appended, never truncated: the path may be one the caller has already told
+# somebody to watch, and truncating it under a live `tail -f` loses the head of
+# the story for no gain.
+if [ -n "$LOG_ARG" ]; then
+  LOG="$LOG_ARG"
+  ( umask 077; command touch "$LOG" ) || die "--log: cannot write $LOG"
+else
+  _LOG_TMP="${TMPDIR:-/tmp}"
+  _LOG_TMP="$(mktemp "${_LOG_TMP%/}/new-change-XXXXXX")"
+  LOG="$_LOG_TMP.log"
+  mv "$_LOG_TMP" "$LOG"
+fi
 exec 3>&2
 if [ "$VERBOSE" = 1 ]; then
   exec 2> >(command tee -a "$LOG" >&3)
@@ -246,6 +277,42 @@ WT="$(ticket_worktree_path "$ROOT" "$TICKET")"
 # while the parent is dirty — that is most of the time an agent asks — and this
 # path writes nothing at all.
 if [ "$INFO" = 1 ]; then
+  # AND IT ANSWERS FROM ANYWHERE, exactly as `close` does. `ticket_worktree_path`
+  # spells the worktree `<parent>/<basename $ROOT>-<TICKET>` and $ROOT is the
+  # nearest git toplevel to $PWD, so asking about a ticket from a different repo
+  # composed a path out of the wrong repo's name and refused — reporting a
+  # missing worktree when what was wrong was the directory. `close` had the same
+  # defect and it cost a failed call in an eval; `info` is the command an agent
+  # reaches for when it has only the ticket id, which is precisely when it is
+  # least likely to be standing in the right place.
+  #
+  # Same resolver, deliberately: one definition of "the worktrees named TICKET"
+  # for both verbs, so `wt info T` and `wt close T` cannot answer about
+  # different worktrees.
+  if [ ! -d "$WT" ]; then
+    INFO_FOUND="$(ticket_worktree_candidates "$(worktree_parent_dir "$ROOT")" "$TICKET")"
+    INFO_N="$(printf '%s\n' "$INFO_FOUND" | command grep -c . || true)"
+    if [ "$INFO_N" = 1 ]; then
+      WT="$(printf '%s\n' "$INFO_FOUND" | command sed -n 1p)"
+      # The repo is re-derived from the WORKTREE, because $KIND and the repo
+      # basename on the BRANCH line are facts about the repo that owns it, not
+      # about the one $PWD happens to be in.
+      ROOT="$(main_checkout_root "$WT")" || die "cannot resolve the main working tree for $WT"
+      KIND="$(checkout_kind "$ROOT")"
+      info "resolved:  $TICKET -> $WT (not a worktree of the repo \$PWD is in)"
+    elif [ "${INFO_N:-0}" -gt 1 ]; then
+      printf '%s\n' "$INFO_FOUND" | while IFS= read -r c; do
+        [ -n "$c" ] && printf '    %s\n' "$c" >&2
+      done
+      # `info` takes a ticket and never a path, so the disambiguation is to stand
+      # in the repo that owns the one you mean — the conventional path wins
+      # whenever it exists. The FIX is the command that lists them, which is
+      # runnable exactly as printed; picking one here would be the guess this
+      # branch exists to refuse.
+      die_fix 1 "ls -d $(worktree_parent_dir "$ROOT")/*-$TICKET" \
+        "$INFO_N worktrees are named $TICKET (each one named in the log) — cd into the repo that owns the one you mean"
+    fi
+  fi
   [ -d "$WT" ] || die_fix 1 "$SCRIPT_DIR/wt new $TICKET" \
     "no worktree for $TICKET at $WT"
   # What the worktree is ACTUALLY on, not what `new` would have called it: a

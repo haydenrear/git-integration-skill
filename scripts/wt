@@ -106,6 +106,15 @@ Everything else is on demand: `wt info <TICKET>` (or `--verbose`) prints
 WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE / PROPAGATE, and --verbose,
 --force and --dry-run print the underlying script's own output as well.
 references/worktrees.md explains why each key is what it is.
+
+HOW LONG `new` TAKES, AND HOW TO WAIT FOR IT. Nearly all of it is copying the
+Skill Manager home, so the cost tracks the SOURCE HOME and not the repo.
+Measured on this machine: ~48 s against an 18-unit / 852 MB project home
+(29 s of that is the file copy itself), a few seconds against a small one.
+Nothing is printed until it is done. If it may outlast your timeout, do not
+poll — `wt` prints, on stderr, one line naming a log the moment the run passes
+WT_PROGRESS_AFTER seconds (default 25; set 0 to silence it), and `tail -f` on
+that file shows the phases live. `close` is seconds; it runs no clone.
 EOF
 }
 
@@ -208,17 +217,117 @@ ERRLOG="$(mktemp "${_WT_TMP%/}/wt-XXXXXX")"   # %/ — TMPDIR usually ends in on
 mv "$ERRLOG" "$ERRLOG.log"                    # .log so the name says what it is
 ERRLOG="$ERRLOG.log"
 KEEP_ERRLOG=0
-cleanup() { [ "$KEEP_ERRLOG" = 1 ] || rm -f "$ERRLOG"; }
+
+# ------------------------------------------------------- a run you can WAIT ON
+#
+# THE COST THIS FIXES IS NOT OUTPUT, IT IS LATENCY FORCING ROUND-TRIPS.
+#
+# `wt new` prints nothing until it finishes — the contract is emitted atomically
+# at the end, which is exactly what makes the one-line summary possible. Measured
+# against an 18-unit / 852 MB project home it ran for 151 s before this change
+# and 48 s after it. Either number can exceed a caller's foreground timeout on a
+# larger home, and when it does the caller must background the command and then
+# POLL, and each poll re-sends the whole growing transcript. Two independent
+# fresh-agent evals measured that loop at roughly a third of one agent's entire
+# token spend; the other spent five extra round-trips looking for a way to wait
+# at all. Neither cost was in the output.
+#
+# So the run is made WATCHABLE instead. `new-change.sh --log FILE` lets the
+# CALLER choose the transcript path before the run starts, and this script picks
+# one, hands it over, and — if and only if the run is still going after
+# WT_PROGRESS_AFTER seconds — prints ONE line naming it. `tail -f` on a file
+# costs a constant; re-reading a transcript costs the transcript.
+#
+# WHY IT IS TIMED RATHER THAN UNCONDITIONAL. A successful `wt new` prints nothing
+# on stderr, and that is an asserted property, not an accident: this whole file
+# exists because the cheap path was not cheap. A run that finishes in three
+# seconds never needed a way to be waited on, and paying a line for it on every
+# invocation is the exact trade this file was written to undo. The line is
+# therefore emitted only by a run long enough to have created the problem it
+# solves. `WT_PROGRESS_AFTER=0` silences it; a small number makes it
+# deterministic for a test.
+PROGRESS_AFTER="${WT_PROGRESS_AFTER:-25}"
+case "$PROGRESS_AFTER" in
+  ''|*[!0-9]*) die_fix 1 "WT_PROGRESS_AFTER=25 $SCRIPT_DIR/wt $VERB ${ARGS[*]}" \
+                 "WT_PROGRESS_AFTER must be a whole number of seconds, got: $PROGRESS_AFTER" ;;
+esac
+
+# For `new`/`info` the watchable file is the child's own transcript, because
+# --quiet sends its narration THERE and not to stderr. For `close` there is no
+# such file — close-change.sh is not run quiet — so its stderr, which this
+# script is already capturing, is the transcript.
+#
+# Two files, never one. Handing new-change.sh $ERRLOG as its --log would give
+# the same file two independent write offsets: `2>"$ERRLOG"` here opens it
+# truncating at offset 0, the child's own `exec 2>>` opens it appending, and its
+# fd 3 (this script's stderr, inherited) still writes at offset 0. The failure
+# path's own tail would overwrite the head of the log it is pointing at.
+#
+# Not on the --verbose path: there the child's own log line is printed to the
+# terminal and the run is already live, so dictating the path would change what
+# that mode reports for no gain.
+RUNLOG=""
+LOG_FLAG=""
+if [ "$VERBOSE" = 0 ]; then
+  case "$VERB" in
+    new|info) RUNLOG="${ERRLOG%.log}-run.log"; LOG_FLAG="--log $RUNLOG" ;;
+  esac
+fi
+WATCH_LOG="${RUNLOG:-$ERRLOG}"
+
+KEEP_RUNLOG=0
+cleanup() {
+  [ "$KEEP_ERRLOG" = 1 ] || rm -f "$ERRLOG"
+  [ -z "$RUNLOG" ] || [ "$KEEP_RUNLOG" = 1 ] || rm -f "$RUNLOG"
+}
 trap cleanup EXIT
 
 RC=0
 if [ "$VERBOSE" = 1 ]; then
   # `tee` so the operator watches it live AND the failure path can still read it.
+  # Not backgrounded: --verbose is already live, so there is nothing a progress
+  # line could add and a second stream would only interleave with the first.
   # shellcheck disable=SC2086
-  OUT="$("$TARGET_SCRIPT" $INFO_FLAG $QUIET_FLAG "${ARGS[@]}" 2> >(tee "$ERRLOG" >&2))" || RC=$?
+  OUT="$("$TARGET_SCRIPT" $INFO_FLAG $QUIET_FLAG $LOG_FLAG "${ARGS[@]}" 2> >(tee "$ERRLOG" >&2))" || RC=$?
 else
+  # Backgrounded so this shell keeps a clock. stdout goes to a file rather than a
+  # command substitution for the same reason: `$( )` blocks, and a blocked shell
+  # cannot say anything while it waits.
+  OUTFILE="$ERRLOG.out"
   # shellcheck disable=SC2086
-  OUT="$("$TARGET_SCRIPT" $INFO_FLAG $QUIET_FLAG "${ARGS[@]}" 2>"$ERRLOG")" || RC=$?
+  "$TARGET_SCRIPT" $INFO_FLAG $QUIET_FLAG $LOG_FLAG "${ARGS[@]}" >"$OUTFILE" 2>"$ERRLOG" &
+  WT_CHILD=$!
+  # Tenths, not seconds. `wt info` answers in about a tenth of a second and a
+  # one-second poll would have made this file's cheapest verb ten times slower
+  # to buy a line it never prints. The cost of the loop is one `sleep 0.1`.
+  ticks=0; announced=0
+  while kill -0 "$WT_CHILD" 2>/dev/null; do
+    command sleep 0.1
+    ticks=$((ticks + 1))
+    waited=$((ticks / 10))
+    if [ "$announced" = 0 ] && [ "$PROGRESS_AFTER" != 0 ] && [ "$ticks" -ge $((PROGRESS_AFTER * 10)) ]; then
+      # ONE line, on stderr, naming a file that exists. It is deliberately not a
+      # progress BAR: the phases are in the log, and a caller that wants them
+      # runs the command this line hands it rather than being sent them.
+      #
+      # It does not START with `wt`, so that no line of documentation quoting
+      # this output can be mistaken for an invocation. Every printed invocation
+      # in this repo is an absolute path, and selftest.sh asserts it over the
+      # pages by looking for a line that begins with a bare `wt <verb>`.
+      printf 'still running after %ss (%s %s) — watch: tail -f %s\n' \
+        "$waited" "$VERB" "${ARGS[0]}" "$WATCH_LOG" >&2
+      # A file somebody has been told to watch is not deleted underneath them.
+      # The EXIT trap unlinks these on a successful run, which is right for a run
+      # nobody was told about and wrong for this one: the whole point of naming
+      # it is that the caller reads it, and it is read after the run as often as
+      # during it.
+      if [ -n "$RUNLOG" ]; then KEEP_RUNLOG=1; else KEEP_ERRLOG=1; fi
+      announced=1
+    fi
+  done
+  wait "$WT_CHILD" || RC=$?
+  OUT="$(command cat "$OUTFILE" 2>/dev/null || true)"
+  rm -f "$OUTFILE"
 fi
 
 # ------------------------------------------------------------- reading a key
@@ -272,8 +381,18 @@ if [ "$RC" = 0 ]; then
       # fact left over that the path does not carry — `feature/<TICKET>` is only
       # the DEFAULT spelling. It costs a clause, not a line.
       WT_BR="$(key BRANCH)"; WT_BR="${WT_BR%% *}"
-      if [ -n "$WT_PATH" ] && [ -n "$WT_BR" ]; then
-        printf 'closed worktree %s (branch %s kept)\n' "$WT_PATH" "$WT_BR"
+      # And the second thing that outlives the worktree: its HOME work, which
+      # `home sync` moved exactly one tier up and no further. Also a clause, for
+      # the same reason and one stronger — the worktree home is gone, the loss
+      # appears in no diff, and a caller who is not told here is not told
+      # anywhere. `%% *` again: the key's value carries the path first and its
+      # explanation after, and the one line takes the path. (#8)
+      WT_HOME="$(key HOME-WORK)"; WT_HOME="${WT_HOME%% *}"
+      CLAUSE=""
+      [ -z "$WT_BR" ]   || CLAUSE="branch $WT_BR kept"
+      [ -z "$WT_HOME" ] || CLAUSE="${CLAUSE:+$CLAUSE; }home work went no further than $WT_HOME — push skill edits from there"
+      if [ -n "$WT_PATH" ] && [ -n "$CLAUSE" ]; then
+        printf 'closed worktree %s (%s)\n' "$WT_PATH" "$CLAUSE"
       elif [ -n "$WT_PATH" ]; then
         printf 'closed worktree %s\n' "$WT_PATH"
       else
@@ -306,8 +425,14 @@ fi
 # nothing behind.
 CHILD_LOG="$(command sed -n 's/^log:[[:space:]][[:space:]]*//p' "$ERRLOG" 2>/dev/null \
              | command sed -n 1p | command awk '{print $1}')"
+# The file this script HANDED the child (--log) wins over the one the child
+# names on stderr. They are the same file whenever both exist; preferring the
+# known path is what lets the failing run mark it for keeping, since the EXIT
+# trap would otherwise unlink the very file the last line points at.
+[ -z "$RUNLOG" ] || [ ! -s "$RUNLOG" ] || CHILD_LOG="$RUNLOG"
 if [ -n "$CHILD_LOG" ] && [ -s "$CHILD_LOG" ]; then
   NAMED_LOG="$CHILD_LOG"
+  [ "$CHILD_LOG" != "$RUNLOG" ] || KEEP_RUNLOG=1
 else
   NAMED_LOG="$ERRLOG"
   KEEP_ERRLOG=1
