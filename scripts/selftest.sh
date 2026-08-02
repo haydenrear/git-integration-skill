@@ -675,6 +675,77 @@ check "$(yesno contains "feature/W1" "$DELETE_V")" \
   "the_closing_contract_names_the_branch_it_left_behind" \
   "DELETE is '${DELETE_V:-<none>}' — the branch outlives the worktree, so naming it is the whole remaining move"
 
+# ------------------------------- 5c. the two contract key sets are EXCLUSIVE
+#
+# `wt --help` states "either, on failure FAILED / FIX". Measured on the pilot:
+# `wt close <T> --force` exited 0 having printed FAILED and FIX and then CLOSED,
+# BRANCH and DELETE. A caller parsing stdout saw a failure on a run that
+# succeeded; a caller that keys on FAILED first saw the opposite of what
+# happened. The forced run is a SUCCESS the operator asked for — the refusal is
+# still printed, in full, on stderr where every other explanation here lives.
+
+step "wt close --force reports one outcome, not both"
+
+FORCED_WT=""
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W2 ) \
+  > "$SCRATCH/wt-new2.out" 2> "$SCRATCH/wt-new2.err" || true
+FORCED_WT="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-new2.out" | command sed -n 1p)"
+
+# Work the gate must block on: a unit the PROJECT home has never seen. Without
+# it the forced path is never reached and the check below measures the clean
+# path twice.
+if [ -n "$FORCED_WT" ] && [ -d "$FORCED_WT/.skill-manager" ]; then
+  seed_home "$FORCED_WT/.skill-manager" "forced-wt-only-unit"
+fi
+
+BLOCK_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W2 ) \
+  > "$SCRATCH/wt-block.out" 2> "$SCRATCH/wt-block.err" || BLOCK_RC=$?
+
+# Anchored on `^KEY` followed by whitespace, always: `CLOSE` is a substring of
+# `CLOSED`, and a substring match here would report the failure key set present
+# on every successful `new`.
+has_key() { command grep -qE "^$1[[:space:]]" "$2"; }
+
+# Non-vacuity, and it is the whole fixture: the forced run below only proves
+# something if the gate really refused first.
+check "$(yesno test "$BLOCK_RC" != 0)" \
+  "the_gate_blocks_the_unforced_close_so_the_forced_one_has_something_to_override" \
+  "wt close exited $BLOCK_RC with a unit only the worktree home holds; see $SCRATCH/wt-block.err"
+check "$(yesno has_key FAILED "$SCRATCH/wt-block.out")" \
+  "a_blocked_close_puts_the_failure_key_set_on_stdout" \
+  "no FAILED line; see $SCRATCH/wt-block.out"
+check "$(yesno test "$(yesno has_key CLOSED "$SCRATCH/wt-block.out")" = 0)" \
+  "a_blocked_close_does_not_also_claim_it_closed" \
+  "CLOSED and FAILED on the same refusing run; see $SCRATCH/wt-block.out"
+
+FORCE_RC2=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W2 --force ) \
+  > "$SCRATCH/wt-force.out" 2> "$SCRATCH/wt-force.err" || FORCE_RC2=$?
+
+check "$(yesno test "$FORCE_RC2" = 0)" \
+  "a_forced_close_succeeds" \
+  "wt close --force exited $FORCE_RC2; see $SCRATCH/wt-force.err"
+check "$(yesno has_key CLOSED "$SCRATCH/wt-force.out")" \
+  "a_forced_close_reports_the_success_key_set" \
+  "no CLOSED line on a run that removed the worktree; see $SCRATCH/wt-force.out"
+check "$(yesno test "$(yesno has_key FAILED "$SCRATCH/wt-force.out")" = 0)" \
+  "a_forced_close_does_not_also_report_the_failure_contract" \
+  "FAILED is on stdout of a run that exited 0 and removed the worktree:
+$(command sed 's/^/        /' "$SCRATCH/wt-force.out")"
+check "$(yesno test "$(yesno has_key FIX "$SCRATCH/wt-force.out")" = 0)" \
+  "a_forced_close_does_not_print_a_fix_for_a_thing_it_did_anyway" \
+  "FIX is on stdout of a successful forced close; see $SCRATCH/wt-force.out"
+
+# The explanation must not have been LOST, only moved. A fix that silenced the
+# refusal instead of re-routing it would satisfy every check above.
+check "$(yesno command grep -q 'DISCARDED' "$SCRATCH/wt-force.err")" \
+  "a_forced_close_still_says_on_stderr_what_it_discarded" \
+  "the forced run threw work away and said so nowhere; see $SCRATCH/wt-force.err"
+check "$(yesno command grep -q 'forced-wt-only-unit' "$SCRATCH/wt-force.err")" \
+  "a_forced_close_names_the_work_it_discarded" \
+  "the discarded unit is not named on stderr; see $SCRATCH/wt-force.err"
+
 # ------------------------- 6. the gate does not make its own CLI exec itself
 
 step "The gate runs the home's own CLI pin without wedging it"

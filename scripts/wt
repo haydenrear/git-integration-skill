@@ -108,6 +108,19 @@ done
 QUIET_FLAG=""
 [ "$VERB" = new ] && QUIET_FLAG="--quiet"
 
+# A run that DISCARDS is never quiet. `close --force` succeeds — exit 0, the
+# CLOSED / BRANCH / DELETE key set, and no FAILED, because the two key sets are
+# exclusive and the operator asked for this one. But the gate's refusal is
+# exactly the list of work being thrown away, and stderr is where close-change.sh
+# puts it. Swallowing that on a successful run would trade one defect (both
+# contracts printed) for a worse one (a teardown that destroys work and says
+# nothing anywhere). So the one flag that means "destroy it anyway" also means
+# "show me what you destroyed".
+FORCED=0
+if [ "$VERB" = close ]; then
+  for a in "${ARGS[@]}"; do [ "$a" = "--force" ] && FORCED=1; done
+fi
+
 # stderr to a file, stdout to a variable. Both, always: on success the stderr is
 # noise an agent should not have to read past, and on failure it is the
 # explanation and must not be lost. Capturing stdout is what lets a child that
@@ -144,6 +157,9 @@ if [ "$RC" != 0 ]; then
     printf '\n--- %s said:\n' "$(basename "$TARGET_SCRIPT")" >&2
     command cat "$ERRLOG" >&2
   }
+elif [ "$FORCED" = 1 ] && [ "$VERBOSE" != 1 ]; then
+  printf '\n--- %s said:\n' "$(basename "$TARGET_SCRIPT")" >&2
+  command cat "$ERRLOG" >&2
 fi
 
 exit "$RC"
