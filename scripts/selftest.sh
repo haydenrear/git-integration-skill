@@ -870,6 +870,70 @@ check "$(yesno test -z "$UNKNOWN")" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
 
+# ------------------------------ every scripts/ file this skill names, it ships
+#
+# `references/skill-homes.md` and `references/onboarding.md` both said "copy
+# `scripts/agent-home.sh` into the repo root", and `close-change.sh` offered the
+# same file as a remedy — and this skill did not ship it. The only copy on the
+# machine belonged to one particular integration repo, so a literal first-time
+# onboarding had nothing to copy and the documented step could not be taken.
+#
+# The assertion is the general one, because "the docs name a file that exists"
+# is the property, not "agent-home.sh exists": every `scripts/<name>` token in
+# any tracked file here must resolve to a file under THIS skill's root.
+
+step "Every scripts/ path this skill names is one it ships"
+
+# The extracted set first. A sweep that matched nothing would report a clean
+# result forever — the same failure mode as every other grep assertion in this
+# file — and the four names below are the ones the docs and the scripts have
+# always instructed a reader to run, so the floor is stated as membership
+# rather than as a count that drifts.
+# `|| true`: `git ls-files` names the INDEX, so a tracked file that is missing
+# from disk makes grep exit 2 and, under `set -u -e`, would abort the suite
+# before the assertion that is about exactly that case could run. Measured while
+# writing the mutation proof for this very check.
+NAMED="$(cd "$SCRIPT_DIR/.." && git ls-files -z 2>/dev/null \
+  | xargs -0 command grep -ohE 'scripts/[A-Za-z0-9_][A-Za-z0-9_.-]*' 2>/dev/null \
+  | command sed 's#^scripts/##; s/[.,;:]*$//' | sort -u || true)"
+MISSING_FLOOR=""
+for want in bootstrap-home.sh new-change.sh close-change.sh wt agent-home.sh; do
+  contains "$want" "$(printf '%s\n' "$NAMED")" || MISSING_FLOOR="$MISSING_FLOOR $want"
+done
+check "$(yesno test -z "$MISSING_FLOOR")" \
+  "the_documented_script_sweep_found_the_scripts_that_are_always_documented" \
+  "the sweep did not even name:$MISSING_FLOOR — it is not looking at the right files"
+
+UNSHIPPED=""
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  [ -e "$SCRIPT_DIR/$name" ] || UNSHIPPED="$UNSHIPPED  scripts/$name"$'\n'
+done <<EOF
+$NAMED
+EOF
+check "$(yesno test -z "$UNSHIPPED")" \
+  "every_scripts_path_this_skill_names_resolves_inside_this_skill" \
+  "named in tracked files but not shipped here:
+$UNSHIPPED"
+
+# Resolution base, asserted. The whole defect survived because the file DID
+# exist — one directory up, in the integration repo that happened to carry this
+# skill as a constituent. A check that resolved `scripts/agent-home.sh` from
+# there would have been green throughout. So: prove the base is the skill root
+# by showing a path that exists ONLY outside it does not satisfy the rule.
+#
+# The decoy's own path is assembled from variables, never written as a
+# `scripts/<name>` literal: this file is tracked, so a literal here would be
+# swept up by the extraction above and the check would fail on its own fixture.
+OUTSIDE="$SCRATCH/outside-base"
+OUTSIDE_DIR="$OUTSIDE/scripts"
+OUTSIDE_NAME="not-a-file-this-skill-ships.sh"
+mkdir -p "$OUTSIDE_DIR"
+printf '#!/bin/sh\nexit 0\n' > "$OUTSIDE_DIR/$OUTSIDE_NAME"
+check "$(yesno absent "$SCRIPT_DIR/$OUTSIDE_NAME")" \
+  "a_scripts_file_that_exists_only_outside_this_skill_does_not_satisfy_the_rule" \
+  "the resolution base is not this skill's scripts/ directory"
+
 # -------------------------------- no script resolves a CLI by a relative path
 #
 # The rule, for every script in this directory: a skill-manager is

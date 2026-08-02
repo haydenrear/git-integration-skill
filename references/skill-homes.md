@@ -22,9 +22,12 @@ One script does this, for both the repo root and every worktree:
 <this-skill>/scripts/bootstrap-home.sh --root <checkout>
 ```
 
-A repo that has been onboarded also carries a two-line locator,
-`scripts/agent-home.sh`, so a person or agent in the checkout does not have to
-know where the skill lives.
+A repo that has been onboarded also carries a locator, `scripts/agent-home.sh`,
+so a person or agent in the checkout does not have to know where the skill
+lives. **This skill ships that file**: copy `<this-skill>/scripts/agent-home.sh`
+into the target repo's own `scripts/` directory. It holds no policy — it finds
+the `bootstrap-home.sh` above and `exec`s it with `--root <repo>`, so a copy of
+it is never a copy of the ordering rules.
 
 ## Where the isolation actually comes from
 
@@ -654,8 +657,11 @@ Two measured consequences worth knowing before you rely on the in-repo copy:
    `git check-ignore -v`.
 3. Write a `skill-project.toml` at the root declaring the units this repo's
    agents need. It is portable intent — the realized state is the home.
-4. Copy `scripts/agent-home.sh` (the locator) into the repo root.
-5. Run `scripts/agent-home.sh` once for the main tree.
+4. Copy this skill's `scripts/agent-home.sh` (the locator) into the repo's own
+   `scripts/` directory: `cp <this-skill>/scripts/agent-home.sh scripts/`.
+5. Run `scripts/agent-home.sh` once for the main tree. (Equivalent, and the
+   spelling to use before the file has been copied:
+   `<this-skill>/scripts/bootstrap-home.sh --root <repo>`.)
 6. From then on, `new-change.sh` gives every worktree its own home. Nothing to
    remember and nothing to **export** — which is a statement about the
    environment, not a promise that the first launch will proceed. Expect the
