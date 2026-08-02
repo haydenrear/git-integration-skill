@@ -64,22 +64,28 @@ usage: new-change.sh <TICKET> [base-branch] [--integration] [--no-home]
                   constituent you are standing in.
   --no-home       Skip the per-worktree Skill Manager home. Agents launched in
                   the worktree then use the operator's global home.
-  --quiet         Suppress the explanatory prose on stderr. The contract on
-                  stdout is unaffected — it is what `wt` shows.
+  --quiet         Print nothing at all on stderr. The contract on stdout is
+                  unaffected — it is what `wt` shows.
+  --verbose       Put the whole log on stderr as it happens, instead of the one
+                  line naming it.
   -h, --help      This message.
 
 Stdout is the contract and nothing else: WORKTREE / BRANCH / LAUNCH / IF-EXIT-8
-/ CLOSE (/ PROPAGATE) on success, FAILED / FIX on failure. `wt new <TICKET>` is
-the same thing with the prose already suppressed.
+/ CLOSE (/ PROPAGATE) on success, FAILED / FIX on failure. Stderr on a
+successful run is one line: the log file holding the narration, this script's
+and bootstrap-home.sh's alike. `wt new <TICKET>` is the same thing with stderr
+suppressed entirely.
 EOF
 }
 
-TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0; QUIET=0
+TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0
+QUIET=0; VERBOSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-home)     SKIP_HOME=1; shift ;;
     --integration) WANT_INTEGRATION=1; shift ;;
     --quiet)       QUIET=1; shift ;;
+    --verbose|-v)  VERBOSE=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     -*)            usage; die "unknown option: $1" ;;
     *)             if [ -z "$TICKET" ]; then TICKET="$1"; elif [ -z "$BASE" ]; then BASE="$1";
@@ -88,10 +94,60 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TICKET" ] || { usage; die "a ticket id is required"; }
 
-# --quiet silences the narration, never the refusals: `die`, `die_fix` and the
-# contract are untouched below. The prose is an explanation of a correct run and
-# `wt` does not want it; a refusal is the run's whole result.
-if [ "$QUIET" = 1 ]; then info() { :; }; step() { :; }; fi
+# ------------------------------------------------------------------ the log
+#
+# Same shape as bootstrap-home.sh's, and for the same measured reason: 44 lines
+# / 4.0 KB on a successful run, of which 28 were a prose restatement of the five
+# contract lines already on stdout. The contract is the output; the prose is the
+# explanation of it, and an explanation belongs where it can be read when it is
+# wanted rather than paid for when it is not.
+#
+# fd 2 becomes the log, so this script's narration, its closing notes AND every
+# byte bootstrap-home.sh writes land in ONE file — which is the point: a worktree
+# provisioning is one story, and it used to be told in two places. fd 3 is the
+# operator's real stderr and carries one line.
+#
+# --quiet is unchanged in meaning and is what `wt` passes: nothing on stderr at
+# all, because `wt` prints its own contract and captures this one.
+_LOG_TMP="${TMPDIR:-/tmp}"
+_LOG_TMP="$(mktemp "${_LOG_TMP%/}/new-change-XXXXXX")"
+LOG="$_LOG_TMP.log"
+mv "$_LOG_TMP" "$LOG"
+exec 3>&2
+if [ "$VERBOSE" = 1 ]; then
+  exec 2> >(command tee -a "$LOG" >&3)
+else
+  exec 2>>"$LOG"
+fi
+
+# 20, the tail, and the log line first — all three for the reasons spelled out
+# beside bootstrap-home.sh's copy. The one that matters most here: `wt` quotes
+# the LAST NON-EMPTY STDERR LINE as its FAILED reason when a child dies without a
+# contract, so the failure's own last line has to stay last.
+LOG_TAIL=20
+report_failure() {
+  local total
+  total="$(command wc -l < "$LOG" 2>/dev/null | command tr -d ' ')" || total=0
+  [ -n "$total" ] || total=0
+  if [ "$total" -gt "$LOG_TAIL" ]; then
+    printf 'log:       %s  (%s earlier line(s) omitted below)\n' "$LOG" "$((total - LOG_TAIL))" >&3
+  else
+    printf 'log:       %s\n' "$LOG" >&3
+  fi
+  command tail -n "$LOG_TAIL" "$LOG" >&3 2>/dev/null || true
+}
+on_exit() {
+  local rc=$?
+  if [ "$rc" != 0 ]; then
+    if [ "$VERBOSE" = 1 ]; then
+      printf 'log:       %s\n' "$LOG" >&3
+    else
+      report_failure
+    fi
+  fi
+  return "$rc"
+}
+trap on_exit EXIT
 
 # ------------------------------------------------------- which repo, out loud
 
@@ -336,3 +392,8 @@ into the project home is NOT the same as pushing a skill edit back to that
 skill's own repo — that is the separate push-back flow, and it is not
 propagate.sh.
 EOF
+
+# The whole of stderr on a successful run. Everything above is in the file it
+# names, including bootstrap-home.sh's own narration, which this script's fd 2
+# collected on the way past.
+[ "$QUIET" = 1 ] || [ "$VERBOSE" = 1 ] || printf 'log:       %s\n' "$LOG" >&3

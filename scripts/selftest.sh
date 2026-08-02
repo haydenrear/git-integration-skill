@@ -896,6 +896,49 @@ git -C "$CHEAP" add -A
 git -C "$CHEAP" -c commit.gpgsign=false commit -qm "fixture"
 seed_home "$CHEAP/.skill-manager" "cheap-project-unit"
 
+# ---- new-change.sh called DIRECTLY, which is the path `wt` does not cover.
+#
+# `wt` captures its child's stderr and discards it on success, so every
+# measurement of "how much does provisioning a worktree print" taken through `wt`
+# reads zero no matter what the child does. Measured on the direct call: 44 lines
+# / 3970 bytes on stderr, of which 28 were a prose restatement of the five
+# contract lines already on stdout.
+#
+# Budget and evidence in ONE check again, and here the evidence is the CONTRACT:
+# a script that printed nothing at all on both streams would satisfy a line
+# budget perfectly.
+NCD_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/new-change.sh" WD1 ) \
+  > "$SCRATCH/nc-direct.out" 2> "$SCRATCH/nc-direct.err" || NCD_RC=$?
+NCD_LOG="$(run_log "$SCRATCH/nc-direct.err")"
+nc_under_budget_with_contract() {
+  [ "$NCD_RC" = 0 ] || return 1
+  [ "$(lines_of "$SCRATCH/nc-direct.err")" -le 1 ] || return 1
+  command grep -q '^WORKTREE ' "$SCRATCH/nc-direct.out" || return 1
+  command grep -q '^LAUNCH ' "$SCRATCH/nc-direct.out" || return 1
+  command grep -q '^CLOSE ' "$SCRATCH/nc-direct.out" || return 1
+  return 0
+}
+check "$(yesno nc_under_budget_with_contract)" \
+  "a_direct_new_change_prints_one_line_of_stderr_AND_the_whole_contract_on_stdout" \
+  "rc=$NCD_RC, stderr $(lines_of "$SCRATCH/nc-direct.err") line(s), stdout:
+$(command sed 's/^/        /' "$SCRATCH/nc-direct.out")
+      stderr:
+$(command sed 's/^/        /' "$SCRATCH/nc-direct.err")"
+# And the narration is somewhere, in ONE file — this script's and
+# bootstrap-home.sh's alike, which is the reason fd 2 is redirected rather than
+# each call site rewritten.
+check "$(yesno test -s "${NCD_LOG:-/nonexistent}")" \
+  "the_direct_run_names_a_log_that_was_written" \
+  "'${NCD_LOG:-<none>}' is missing or empty"
+check "$(yesno command grep -q '^verified: ' "${NCD_LOG:-/nonexistent}")" \
+  "the_worktrees_own_bootstrap_narration_lands_in_that_same_log" \
+  "no 'verified:' line in ${NCD_LOG:-<none>} — bootstrap-home.sh's output went somewhere else"
+check "$(yesno command grep -q 'Teardown note' "${NCD_LOG:-/nonexistent}")" \
+  "and_so_does_new_changes_own_closing_prose" \
+  "the closing notes were deleted rather than moved; they are the explanation of the contract"
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close WD1 --force ) >/dev/null 2>&1 || true
+
 NEW_RC=0
 ( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W1 ) \
   > "$SCRATCH/wt-new.out" 2> "$SCRATCH/wt-new.err" || NEW_RC=$?
