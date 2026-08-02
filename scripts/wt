@@ -1,9 +1,39 @@
 #!/usr/bin/env bash
 # wt new <TICKET> [base-branch] [--integration] [--no-home]
 # wt close <TICKET|PATH> [--force] [--dry-run]
+# wt info <TICKET>
 #
 # The cheap path. One entry point for the whole worktree lifecycle, runnable by
 # an agent that knows the ticket id and nothing else.
+#
+# ONE LINE, because this runs constantly
+# --------------------------------------
+# A successful `new` or `close` prints exactly one line, and the only thing on
+# it that an agent cannot derive is the worktree PATH:
+#
+#   created worktree /repos/proj-T-2
+#   closed worktree /repos/proj-T-2 (branch feature/T-2 kept)
+#
+# It used to print five keyed lines, four of which restated the first: LAUNCH is
+# `<WORKTREE>/.skill-manager/bin/launch/claude` by construction, IF-EXIT-8 is
+# `<WORKTREE>/.skill-manager/bin/cli/skill-manager home drift --ack` by
+# construction, CLOSE is `wt close <TICKET>` — the command the caller just
+# typed the other half of — and BRANCH is `feature/<TICKET>`. Four long
+# absolute paths, on every worktree creation, for facts that follow from the
+# fifth. IF-EXIT-8 was the worst of them: a remedy for a gate that had not
+# fired, paid for on every run in which it never fires.
+#
+# They are not GONE, they are ON DEMAND. `wt info <TICKET>` prints the whole
+# key set for a worktree that already exists, and `--verbose` prints it on the
+# run that creates one. Both go through new-change.sh, which is still the only
+# thing that computes them.
+#
+# The FAILING run is the one that may cost more, because the next move is not
+# derivable from anything. It prints at most three short lines — what went
+# wrong, one command that fixes it, and the log holding the rest — and it no
+# longer dumps the child's whole stderr to the console. That dump was measured
+# at 23 lines / 2.7 KB for a refused close, which is the case an agent meets
+# most often and can least afford.
 #
 # Why this file exists
 # --------------------
@@ -19,13 +49,10 @@
 #
 # So the entry point has to be cheaper than improvising one. That means:
 #
-#   * ONE name, two verbs, no options you have to know about.
-#   * The output is the next move. Stdout carries a fixed set of KEY/value
-#     lines and nothing else — see `contract` in lib.sh. Every value is a path
-#     or a command that runs.
-#   * A failure prints two lines: what failed, and the one command that fixes
-#     it. The explanation still exists, on stderr, and is printed only when it
-#     is needed.
+#   * ONE name, three verbs, no options you have to know about.
+#   * The output is the next move, and it is one line long.
+#   * A failure names the one command that fixes it and a log holding the
+#     reasoning. The reasoning is never printed.
 #
 # What this file is NOT
 # ---------------------
@@ -40,47 +67,59 @@
 #
 # Which also answers git-issue-skill#4 — whether this primitive belongs in
 # `git-issue` or in `skill-manager` rather than here. The interface a caller
-# depends on is the KEY set, not this path: a `wt` shipped from somewhere else
-# is compatible if it prints WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE on
-# success and FAILED / FIX on failure. Callers that read those keys survive the
-# move; callers that parse the prose never could.
+# depends on is still a KEY set, not this path; what changed is WHERE it is
+# printed. `wt info <TICKET>`, and `wt new --verbose`, print WORKTREE / BRANCH /
+# LAUNCH / IF-EXIT-8 / CLOSE (/ PROPAGATE) exactly as before, and a refusal
+# still prints FAILED / FIX — those are new-change.sh's and close-change.sh's
+# own contract, unchanged, and a `wt` shipped from somewhere else is compatible
+# if it forwards them. A caller that parsed the ONE-LINE summary is parsing
+# prose and never could be relied on; `wt info` is what such a caller should
+# read instead.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<'EOF'
 usage: wt new   <TICKET> [base-branch] [--integration] [--no-home] [--verbose]
        wt close <TICKET|PATH> [--force] [--dry-run] [--verbose]
+       wt info  <TICKET>
 
   new     Create the worktree for TICKET AND its own Skill Manager home, in the
           repo you are standing in, and leave it launchable.
   close   Tear that worktree down through the close-out gate, which refuses
           while its home still holds work that removing it would destroy.
+  info    Print the full key set for a worktree that already exists. Creates
+          and removes nothing.
 
-  --verbose  Also show the explanatory output of the underlying script.
+A successful new or close prints ONE line, and the path on it is the only fact
+that does not follow from convention:
 
-Stdout is the contract and carries nothing else:
+  created worktree <path>
+  closed worktree <path> (branch <branch> kept)
 
-  new, on success     WORKTREE   where to edit
-                      BRANCH     what was branched, from what
-                      LAUNCH     starts an agent bound to this worktree's home
-                      IF-EXIT-8  clears the first-launch drift gate
-                      CLOSE      tears it down through the gate
-                      PROPAGATE  the fan-out (integration repos only)
-  close, on success   CLOSED / BRANCH / DELETE
-  either, on failure  FAILED     one line, what went wrong
-                      FIX        one command, run it
+A refusal prints what went wrong, one command to run, and a log:
 
-references/worktrees.md explains WHY each of those is what it is. The happy
-path does not need it.
+  error creating worktree: <one line>
+  fix: <command>
+  log: <path>
+
+Everything else is on demand: `wt info <TICKET>` (or `--verbose`) prints
+WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE / PROPAGATE, and --verbose,
+--force and --dry-run print the underlying script's own output as well.
+references/worktrees.md explains why each key is what it is.
 EOF
 }
 
 VERB="${1:-}"; [ $# -gt 0 ] && shift || true
+# `info` is new-change.sh in its read-only mode, not a fourth script: the paths
+# it prints are `ticket_worktree_path`'s answer, and a front door that recomputed
+# them would be the second opinion issue #50 is about.
+INFO_FLAG=""
 case "$VERB" in
   new)   TARGET_SCRIPT="$SCRIPT_DIR/new-change.sh" ;;
   close) TARGET_SCRIPT="$SCRIPT_DIR/close-change.sh" ;;
+  info)  TARGET_SCRIPT="$SCRIPT_DIR/new-change.sh"; INFO_FLAG="--info" ;;
   ""|-h|--help|help) usage; [ -n "$VERB" ] && exit 0 || exit 1 ;;
-  *)     usage; die_fix 1 "$SCRIPT_DIR/wt help" "unknown verb: $VERB (expected 'new' or 'close')" ;;
+  *)     usage; die_fix 1 "$SCRIPT_DIR/wt help" "unknown verb: $VERB (expected 'new', 'close' or 'info')" ;;
 esac
 
 # --verbose is this file's own; everything else is forwarded verbatim, so `wt`
@@ -105,8 +144,11 @@ done
 # 3.2.57 — so the close path would die before running anything. There is
 # exactly one flag and it has no spaces, so a word-split scalar is both correct
 # and the shape that cannot regress here.
+# A `case`, not an `&&` list: `[ a ] || [ b ] && c` under `set -u`/`set -e` is
+# exactly the shape whose exemption rules nobody remembers correctly, and this
+# file already carries one bash-3.2 scar.
 QUIET_FLAG=""
-[ "$VERB" = new ] && QUIET_FLAG="--quiet"
+case "$VERB" in new|info) QUIET_FLAG="--quiet" ;; esac
 
 # A run that DISCARDS is never quiet. `close --force` succeeds — exit 0, the
 # CLOSED / BRANCH / DELETE key set, and no FAILED, because the two key sets are
@@ -117,49 +159,171 @@ QUIET_FLAG=""
 # nothing anywhere). So the one flag that means "destroy it anyway" also means
 # "show me what you destroyed".
 FORCED=0
+DRY=0
 if [ "$VERB" = close ]; then
-  for a in "${ARGS[@]}"; do [ "$a" = "--force" ] && FORCED=1; done
+  for a in "${ARGS[@]}"; do
+    [ "$a" = "--force" ] && FORCED=1
+    [ "$a" = "--dry-run" ] && DRY=1
+  done
 fi
+
+# WHEN THE ONE-LINE SUMMARY IS NOT THE ANSWER.
+#
+# A SUCCESSFUL run prints one line, because `new` and `close` run constantly and
+# the path is the only fact on them. Four invocations are not that, and all four
+# ask for the full contract by construction:
+#
+#   --verbose   the operator asked to see the working
+#   info        the whole verb IS the key set
+#   --dry-run   the answer to "would this close cleanly" is CLEAN / CLOSE, not
+#               a sentence about a teardown that did not happen
+#   --force     a teardown that DESTROYS work. One line saying it succeeded is
+#               precisely the wrong output: what was thrown away is the only
+#               thing worth printing, and close-change.sh prints it. The flag
+#               that means "destroy it anyway" also means "show me what you
+#               destroyed" — unchanged from before.
+#
+# This is about the SUCCESS shape only. A FAILING run is compact whatever verb
+# or flag produced it (below, and `--verbose` excepted): none of the four
+# reasons above survives a run that did nothing — there is no contract to print,
+# nothing was destroyed, and the operator's next move is the same three lines
+# either way.
+SUMMARIZE=1
+[ "$VERBOSE" = 1 ] && SUMMARIZE=0
+[ "$FORCED" = 1 ] && SUMMARIZE=0
+[ "$DRY" = 1 ] && SUMMARIZE=0
+[ "$VERB" = info ] && SUMMARIZE=0
 
 # stderr to a file, stdout to a variable. Both, always: on success the stderr is
 # noise an agent should not have to read past, and on failure it is the
-# explanation and must not be lost. Capturing stdout is what lets a child that
+# explanation and must not be lost — but it is NAMED rather than printed, which
+# is the whole failure-path saving. Capturing stdout is what lets a child that
 # died WITHOUT emitting a contract still be answered with one.
-ERRLOG="$(mktemp "${TMPDIR:-/tmp}/wt-XXXXXX")"
-cleanup() { rm -f "$ERRLOG"; }
+#
+# The file therefore OUTLIVES a failing run. It used to be unlinked on exit,
+# which is safe only because the whole thing was dumped to the console first;
+# naming a log this script had already deleted would be the worst of both.
+_WT_TMP="${TMPDIR:-/tmp}"
+ERRLOG="$(mktemp "${_WT_TMP%/}/wt-XXXXXX")"   # %/ — TMPDIR usually ends in one
+mv "$ERRLOG" "$ERRLOG.log"                    # .log so the name says what it is
+ERRLOG="$ERRLOG.log"
+KEEP_ERRLOG=0
+cleanup() { [ "$KEEP_ERRLOG" = 1 ] || rm -f "$ERRLOG"; }
 trap cleanup EXIT
 
 RC=0
 if [ "$VERBOSE" = 1 ]; then
   # `tee` so the operator watches it live AND the failure path can still read it.
   # shellcheck disable=SC2086
-  OUT="$("$TARGET_SCRIPT" $QUIET_FLAG "${ARGS[@]}" 2> >(tee "$ERRLOG" >&2))" || RC=$?
+  OUT="$("$TARGET_SCRIPT" $INFO_FLAG $QUIET_FLAG "${ARGS[@]}" 2> >(tee "$ERRLOG" >&2))" || RC=$?
 else
   # shellcheck disable=SC2086
-  OUT="$("$TARGET_SCRIPT" $QUIET_FLAG "${ARGS[@]}" 2>"$ERRLOG")" || RC=$?
+  OUT="$("$TARGET_SCRIPT" $INFO_FLAG $QUIET_FLAG "${ARGS[@]}" 2>"$ERRLOG")" || RC=$?
 fi
 
-[ -z "$OUT" ] || printf '%s\n' "$OUT"
+# ------------------------------------------------------------- reading a key
+#
+# The child's contract is the source of every value printed below. `wt` reads
+# it; it never recomputes it. Anchored on `^KEY` followed by whitespace because
+# CLOSE is a substring of CLOSED and an unanchored match reports the failure
+# key set present on every success.
+key() { printf '%s\n' "$OUT" | command sed -n "s/^$1[[:space:]][[:space:]]*//p" | command sed -n 1p; }
 
-if [ "$RC" != 0 ]; then
-  # A child that refused through `die` rather than `die_fix` has said why on
-  # stderr and named no command. Answering it with nothing would put the agent
-  # back where it started — reading prose to work out what to run — so the
-  # fallback is its last stderr line as the reason and a verbose re-run as the
-  # command. Not a good FIX, but a runnable one, and its absence is what makes
-  # a refusal expensive.
+# --verbose is the one mode that keeps the old failing shape in full: the
+# operator asked to watch it happen, and the child's stderr has already been
+# tee'd to the terminal as it ran.
+if [ "$RC" != 0 ] && [ "$VERBOSE" = 1 ]; then
+  [ -z "$OUT" ] || printf '%s\n' "$OUT"
   case "$OUT" in
     *FAILED*) : ;;
     *) contract_fail "$SCRIPT_DIR/$(basename "$TARGET_SCRIPT") ${ARGS[*]}" \
          "$(command grep -v '^[[:space:]]*$' "$ERRLOG" | command tail -n 1 || printf 'exit %s' "$RC")" ;;
   esac
-  [ "$VERBOSE" = 1 ] || {
+  exit "$RC"
+fi
+
+if [ "$RC" = 0 ] && [ "$SUMMARIZE" = 0 ]; then
+  # Pass-through: the contract on stdout, and the child's prose on stderr when
+  # the caller asked for it or destroyed something with it.
+  [ -z "$OUT" ] || printf '%s\n' "$OUT"
+  if [ "$FORCED" = 1 ] && [ "$VERBOSE" != 1 ]; then
     printf '\n--- %s said:\n' "$(basename "$TARGET_SCRIPT")" >&2
     command cat "$ERRLOG" >&2
-  }
-elif [ "$FORCED" = 1 ] && [ "$VERBOSE" != 1 ]; then
-  printf '\n--- %s said:\n' "$(basename "$TARGET_SCRIPT")" >&2
-  command cat "$ERRLOG" >&2
+  fi
+  exit 0
 fi
+
+# ----------------------------------------------------------------- one line
+#
+# WHAT and WHAT-IS-DERIVABLE-FROM-IT, and only the first is printed. The
+# fallback when a key is missing is the child's whole contract rather than a
+# confident sentence built from an empty string: a summary naming "" as the
+# worktree is worse than five lines, because it reads as an answer.
+if [ "$RC" = 0 ]; then
+  case "$VERB" in
+    new)
+      WT_PATH="$(key WORKTREE)"
+      if [ -n "$WT_PATH" ]; then printf 'created worktree %s\n' "$WT_PATH"
+      else [ -z "$OUT" ] || printf '%s\n' "$OUT"; fi
+      ;;
+    close)
+      WT_PATH="$(key CLOSED)"
+      # The branch outlives the worktree, and which branch that is, is the one
+      # fact left over that the path does not carry — `feature/<TICKET>` is only
+      # the DEFAULT spelling. It costs a clause, not a line.
+      WT_BR="$(key BRANCH)"; WT_BR="${WT_BR%% *}"
+      if [ -n "$WT_PATH" ] && [ -n "$WT_BR" ]; then
+        printf 'closed worktree %s (branch %s kept)\n' "$WT_PATH" "$WT_BR"
+      elif [ -n "$WT_PATH" ]; then
+        printf 'closed worktree %s\n' "$WT_PATH"
+      else
+        [ -z "$OUT" ] || printf '%s\n' "$OUT"
+      fi
+      ;;
+  esac
+  exit 0
+fi
+
+# The failing run. Three lines at most, and each one answers a question the
+# agent has and cannot derive: what stopped it, what to run, where the
+# reasoning is. The reasoning itself is NOT printed — that dump was the whole
+# cost of a refusal, and it is still every byte of it, in the file named here.
+#
+# A child that refused through `die` rather than `die_fix` named no command, so
+# the fallback is its last non-blank stderr line as the reason and a verbose
+# re-run as the fix. Not a good fix, but a runnable one.
+#
+# The richest log there is. new-change.sh keeps its own transcript in a file and
+# names it on the first line of its stderr; close-change.sh has no such file, so
+# what this script captured IS the transcript. Preferring the child's means the
+# named log holds the whole story rather than a tail of it.
+#
+# Resolved in THIS shell, never inside a command substitution: KEEP_ERRLOG is
+# what stops the EXIT trap unlinking the very file the last line names, and an
+# assignment made inside `$( )` is made in a subshell and lost. A named log that
+# has already been deleted is worse than no log line at all — it reads as an
+# answer. Reached only on the failing path, so a successful run still leaves
+# nothing behind.
+CHILD_LOG="$(command sed -n 's/^log:[[:space:]][[:space:]]*//p' "$ERRLOG" 2>/dev/null \
+             | command sed -n 1p | command awk '{print $1}')"
+if [ -n "$CHILD_LOG" ] && [ -s "$CHILD_LOG" ]; then
+  NAMED_LOG="$CHILD_LOG"
+else
+  NAMED_LOG="$ERRLOG"
+  KEEP_ERRLOG=1
+fi
+
+REASON="$(key FAILED)"
+FIX="$(key FIX)"
+[ -n "$REASON" ] || REASON="$(command grep -v '^[[:space:]]*$' "$ERRLOG" | command tail -n 1)"
+[ -n "$REASON" ] || REASON="exit $RC"
+[ -n "$FIX" ] || FIX="$SCRIPT_DIR/wt $VERB ${ARGS[*]} --verbose"
+case "$VERB" in
+  new)   printf 'error creating worktree: %s\n' "$REASON" ;;
+  close) printf 'error closing worktree: %s\n' "$REASON" ;;
+  *)     printf 'error: %s\n' "$REASON" ;;
+esac
+printf 'fix: %s\n' "$FIX"
+printf 'log: %s\n' "$NAMED_LOG"
 
 exit "$RC"

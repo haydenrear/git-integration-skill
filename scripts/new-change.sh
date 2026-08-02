@@ -68,24 +68,27 @@ usage: new-change.sh <TICKET> [base-branch] [--integration] [--no-home]
                   unaffected — it is what `wt` shows.
   --verbose       Put the whole log on stderr as it happens, instead of the one
                   line naming it.
+  --info          Print the contract for a worktree that ALREADY exists, and
+                  create nothing. `wt info <TICKET>` is this.
   -h, --help      This message.
 
 Stdout is the contract and nothing else: WORKTREE / BRANCH / LAUNCH / IF-EXIT-8
 / CLOSE (/ PROPAGATE) on success, FAILED / FIX on failure. Stderr on a
 successful run is one line: the log file holding the narration, this script's
-and bootstrap-home.sh's alike. `wt new <TICKET>` is the same thing with stderr
-suppressed entirely.
+and bootstrap-home.sh's alike. `wt new <TICKET>` runs this and prints a ONE-LINE
+summary of the contract instead; `wt info <TICKET>` prints the contract itself.
 EOF
 }
 
 TICKET=""; BASE=""; SKIP_HOME="${INTEGRATION_SKIP_HOME:-0}"; WANT_INTEGRATION=0
-QUIET=0; VERBOSE=0
+QUIET=0; VERBOSE=0; INFO=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-home)     SKIP_HOME=1; shift ;;
     --integration) WANT_INTEGRATION=1; shift ;;
     --quiet)       QUIET=1; shift ;;
     --verbose|-v)  VERBOSE=1; shift ;;
+    --info)        INFO=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     -*)            usage; die "unknown option: $1" ;;
     *)             if [ -z "$TICKET" ]; then TICKET="$1"; elif [ -z "$BASE" ]; then BASE="$1";
@@ -149,6 +152,46 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# ------------------------------------------------------------------ the contract
+#
+# STDOUT, and nothing else on it. These are the facts an agent needs to take its
+# next step, and they are emitted HERE rather than assembled by `wt` afterwards
+# because this script is the only thing that authoritatively knows them: $WT came
+# from `ticket_worktree_path`, which is the same function close-change.sh
+# resolves the ticket with, and $ROOT/$KIND came from the resolution this script
+# already printed. A front door that re-derived them would be a second opinion
+# about which worktree belongs to which repo, and issue #50 is what a second
+# opinion about that costs.
+#
+# ONE function, called from the creating path and from `--info`, because those
+# two answer the same question about the same worktree and a second copy is a
+# second chance to disagree. `wt new` prints a one-line summary OF THIS, and
+# `wt info` prints THIS; neither assembles it.
+#
+# The LAUNCH branch keys on whether the home is THERE, not on whether --no-home
+# was passed. The two coincide on the creating path; on `--info` only the first
+# is knowable, and it is the one that is true — printing a shim that does not
+# exist is the same class of defect as `verified` over an empty home.
+emit_contract() {
+  local wt="$1" branch_desc="$2"
+  contract WORKTREE  "$wt"
+  contract BRANCH    "$branch_desc"
+  if [ -d "$wt/.skill-manager" ]; then
+    contract LAUNCH    "$wt/.skill-manager/bin/launch/claude"
+    # The first launch from a fresh home is REFUSED with exit 8 until the change
+    # to its units has been read. That is not an error, it is the drift gate, and
+    # an agent that meets it without this line goes looking for a reference page.
+    # It is NOT on `wt new`'s one-line summary on purpose: a remedy for a gate
+    # that has not fired is paid for on every run in which it never fires, and
+    # `wt info` is where an agent that HAS met exit 8 looks.
+    contract IF-EXIT-8 "$wt/.skill-manager/bin/cli/skill-manager home drift --ack"
+  else
+    contract LAUNCH    "none — this worktree has no home; an agent here uses the operator's GLOBAL home"
+  fi
+  contract CLOSE     "$SCRIPT_DIR/wt close $TICKET"
+  [ "$KIND" != integration ] || contract PROPAGATE "$SCRIPT_DIR/propagate.sh $TICKET"
+}
+
 # ------------------------------------------------------- which repo, out loud
 
 FROM="$PWD"
@@ -183,10 +226,38 @@ case "$KIND" in
 esac
 
 cd "$ROOT"
-assert_parent_clean "$ROOT"
 
 BRANCH="feature/$TICKET"
 WT="$(ticket_worktree_path "$ROOT" "$TICKET")"
+
+# ------------------------------------------------------------------- --info
+#
+# The same contract, for a worktree that already exists. It exists because `wt
+# new` now prints ONE line — the worktree path, the only fact on the old
+# five-line contract that does not follow from the others — and the rest has to
+# stay ANSWERABLE rather than merely derivable-in-principle.
+#
+# It is here, and not in `wt`, for the reason the contract block below is here:
+# $WT is `ticket_worktree_path`'s answer and $KIND is this script's resolution,
+# and a front door that recomputed either would be a second opinion about which
+# worktree belongs to which repo. That is issue #50.
+#
+# Above `assert_parent_clean` deliberately. Asking where a worktree is must work
+# while the parent is dirty — that is most of the time an agent asks — and this
+# path writes nothing at all.
+if [ "$INFO" = 1 ]; then
+  [ -d "$WT" ] || die_fix 1 "$SCRIPT_DIR/wt new $TICKET" \
+    "no worktree for $TICKET at $WT"
+  # What the worktree is ACTUALLY on, not what `new` would have called it: a
+  # worktree may have been rebranched, and reporting the default spelling of a
+  # branch that is not checked out is the class of defect the literal `<branch>`
+  # in the old teardown note was.
+  BRANCH="$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || printf '%s' "$BRANCH")"
+  emit_contract "$WT" "$BRANCH ($KIND repo $(basename "$ROOT"))"
+  exit 0
+fi
+
+assert_parent_clean "$ROOT"
 assert_worktree_outside_integration "$WT"
 # The recovery for this used to be named nowhere, which is how an operator who
 # hit it reached for `rm -rf` or a bare `git worktree remove` — both of which
@@ -316,36 +387,7 @@ EOF
   fi
 fi
 
-# ------------------------------------------------------------------ the contract
-#
-# STDOUT, and nothing else on it. These are the facts an agent needs to take its
-# next step, and they are emitted HERE rather than assembled by `wt` afterwards
-# because this script is the only thing that authoritatively knows them: $WT came
-# from `ticket_worktree_path`, which is the same function close-change.sh
-# resolves the ticket with, and $ROOT/$KIND came from the resolution this script
-# already printed. A front door that re-derived them would be a second opinion
-# about which worktree belongs to which repo, and issue #50 is what a second
-# opinion about that costs.
-if [ "$SKIP_HOME" = 1 ]; then
-  # Honest rather than uniform: with no home there is nothing to launch bound to,
-  # and printing a LAUNCH line naming a shim that does not exist would be the
-  # same class of defect as `verified` over an empty home.
-  contract WORKTREE  "$WT"
-  contract BRANCH    "$BRANCH (from $BASE, $KIND repo $(basename "$ROOT"))"
-  contract LAUNCH    "none — created with --no-home; an agent here uses the operator's GLOBAL home"
-  contract CLOSE     "$SCRIPT_DIR/wt close $TICKET"
-else
-  contract WORKTREE  "$WT"
-  contract BRANCH    "$BRANCH (from $BASE, $KIND repo $(basename "$ROOT"))"
-  contract LAUNCH    "$WT/.skill-manager/bin/launch/claude"
-  # The first launch from a fresh home is REFUSED with exit 8 until the change to
-  # its units has been read. That is not an error, it is the drift gate, and an
-  # agent that meets it without this line goes looking for a reference page —
-  # which is the cost this contract exists to remove.
-  contract IF-EXIT-8 "$WT/.skill-manager/bin/cli/skill-manager home drift --ack"
-  contract CLOSE     "$SCRIPT_DIR/wt close $TICKET"
-fi
-[ "$KIND" != integration ] || contract PROPAGATE "$SCRIPT_DIR/propagate.sh $TICKET"
+emit_contract "$WT" "$BRANCH (from $BASE, $KIND repo $(basename "$ROOT"))"
 
 # ----------------------------------------------------------------- next steps
 

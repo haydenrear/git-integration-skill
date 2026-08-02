@@ -445,8 +445,9 @@ Nothing was withheld, with one deliberate exception:
   is short" is otherwise satisfied by a command that prints nothing.
 - **A failure prints a bounded tail** of the log — 20 lines, which carries every
   refusal this script hand-writes whole — with the log's path on the line above
-  it, so the failure's own last line stays last (`wt` quotes that line as the
-  `FAILED` reason).
+  it, so the failure's own last line stays last (`wt` quotes that line as its
+  `error …:` reason when the child died without a `FAILED` key, and reads the
+  log's path off that same first line to put on its `log:` line).
 - **Deleted rather than demoted:** the paragraph that told you to run
   `sync --force-scripts` to re-provision the links a clone left dangling. Its own
   next sentence said the command "does NOT recreate `<home>/venvs`, so a link

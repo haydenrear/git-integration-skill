@@ -869,6 +869,112 @@ check "$(yesno contains "bootstrap-home.sh --root \"$NOHOME\"" "$(cat "$SCRATCH/
   "the_failure_names_a_remedy_that_actually_works" \
   "the trailing remedy does not name the PROJECT root; see $SCRATCH/newchange.log"
 
+# ------------------------- 5a. the DOCUMENTED first-time path actually works
+#
+# skill-project.toml's header comment is the highest-value page in this repo for
+# a fresh agent — measured: it is the only place the `skill-project.toml` schema
+# and the four-step home sequence are written down, and an eval agent found it
+# and followed it. It opened with `mkdir -p .skill-manager/skills`, and that one
+# line broke the sequence on its FIRST use, both ways round:
+#
+#   without --force  `.skill-manager exists and is not empty — inspect it, then
+#                     pass --force …`, exit 1
+#   with --force     (which the recipe itself carried) the clone is SKIPPED,
+#                    because --force means "re-run the steps on an existing
+#                    home"; three steps later `home policy --live` refuses a
+#                    directory that "carries neither a descriptor nor the
+#                    installed/ + skills/ pair", exit 1
+#
+# Both fixed, and the fix is in two places on purpose. The recipe lost the
+# mkdir, because bootstrap-home.sh creates the home and `home clone` requires an
+# absent or empty destination. And the check learned the difference between
+# "non-empty" and "is a home", because the recipe is copied by hand and
+# pre-creating a directory is a habit — the advice it used to give for that case
+# made the outcome worse rather than better, which is the part that is not
+# merely inconvenient.
+
+step "The documented first-time home recipe works, and pre-creating cannot break it"
+
+# THE RECIPE ITSELF, asserted on the file rather than restated here, because a
+# test that restates the documentation cannot notice the documentation drifting.
+# Both halves in one place: the mkdir is gone AND the line it used to precede is
+# still there. Without the second, deleting the whole recipe would pass.
+RECIPE="$SCRIPT_DIR/../skill-project.toml"
+recipe_creates_nothing_before_bootstrapping() {
+  [ -f "$RECIPE" ] || return 1
+  command grep -q 'bootstrap-home.sh --root' "$RECIPE" || return 1
+  ! command grep -qE '^#[[:space:]]+mkdir .*\.skill-manager' "$RECIPE"
+}
+check "$(yesno recipe_creates_nothing_before_bootstrapping)" \
+  "the_documented_recipe_still_has_a_bootstrap_step_and_no_longer_creates_the_home_first" \
+  "$RECIPE either lost its bootstrap-home.sh line or still tells the reader to
+      mkdir .skill-manager first:
+$(command grep -nE 'mkdir .*\.skill-manager|bootstrap-home.sh --root' "$RECIPE" | command sed 's/^/        /')"
+
+# THE BEHAVIOUR, for the habit the recipe used to teach. A checkout where
+# `.skill-manager/skills` was created by hand must still bootstrap — and the
+# evidence is a real home, not exit 0: a bootstrap that skipped the clone exits
+# 0 in some shapes and leaves a directory with no store at all.
+RECIPEP="$SCRATCH/recipe-premade"
+mkdir -p "$RECIPEP"
+git -C "$RECIPEP" init -q -b main
+git -C "$RECIPEP" config user.email selftest@example.invalid
+git -C "$RECIPEP" config user.name "selftest"
+printf 'fixture\n' > "$RECIPEP/README.md"
+git -C "$RECIPEP" add -A
+git -C "$RECIPEP" -c commit.gpgsign=false commit -qm "fixture"
+mkdir -p "$RECIPEP/.skill-manager/skills"        # the habit, verbatim
+PREMADE_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$RECIPEP" \
+  > "$SCRATCH/recipe-premade.log" 2>&1 || PREMADE_RC=$?
+premade_bootstrapped_a_real_home() {
+  [ "$PREMADE_RC" = 0 ] || return 1
+  [ -e "$RECIPEP/.skill-manager/home.runtime.json" ] || return 1
+  exists "$RECIPEP/.skill-manager/skills/global-only-unit"
+}
+check "$(yesno premade_bootstrapped_a_real_home)" \
+  "a_precreated_skill_manager_directory_no_longer_stops_the_first_bootstrap" \
+  "rc=$PREMADE_RC, descriptor $(yesno exists "$RECIPEP/.skill-manager/home.runtime.json"),
+      cloned unit $(yesno exists "$RECIPEP/.skill-manager/skills/global-only-unit"); see $SCRATCH/recipe-premade.log"
+
+# AND THE CASE THAT MUST STILL REFUSE — with advice that is not the opposite of
+# helpful. A directory holding FILES is somebody's, and --force would skip the
+# clone and leave it exactly as it is, so the refusal must not name --force as
+# the remedy. That sentence is the defect: it is what sent the recipe's own
+# `--force` down the path that died three steps later about descriptors.
+RECIPEF="$SCRATCH/recipe-foreign"
+mkdir -p "$RECIPEF"
+git -C "$RECIPEF" init -q -b main
+git -C "$RECIPEF" config user.email selftest@example.invalid
+git -C "$RECIPEF" config user.name "selftest"
+printf 'fixture\n' > "$RECIPEF/README.md"
+git -C "$RECIPEF" add -A
+git -C "$RECIPEF" -c commit.gpgsign=false commit -qm "fixture"
+mkdir -p "$RECIPEF/.skill-manager"
+printf 'not a home\n' > "$RECIPEF/.skill-manager/notes.txt"
+FOREIGN_RC=0
+bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$RECIPEF" --force \
+  > "$SCRATCH/recipe-foreign.log" 2>&1 || FOREIGN_RC=$?
+check "$(yesno test "$FOREIGN_RC" != 0)" \
+  "a_directory_that_is_not_a_home_is_still_refused_even_with_force" \
+  "exit 0 over $RECIPEF/.skill-manager, which holds files and no home; see $SCRATCH/recipe-foreign.log"
+# `holds files but is not a Skill Manager home`, which is BOOTSTRAP-HOME.SH'S
+# OWN sentence and nothing else's. The obvious spelling — grep for "not a Skill
+# Manager home" — passes on the defect too, because the old code accepted
+# --force, skipped the clone, and let `home policy --live` say almost exactly
+# that three steps later. Same words, different program, and the difference is
+# the whole point: this must be refused BEFORE anything is written.
+check "$(yesno command grep -q 'holds files but is not a Skill Manager home' "$SCRATCH/recipe-foreign.log")" \
+  "and_the_refusal_is_this_scripts_own_before_the_clone_not_the_CLIs_three_steps_later" \
+  "the refusal does not distinguish 'not empty' from 'not a home' in this script's own
+      voice; see $SCRATCH/recipe-foreign.log"
+check "$(yesno command grep -q 'force will NOT help' "$SCRATCH/recipe-foreign.log")" \
+  "and_it_does_not_send_the_operator_to_force_which_would_skip_the_clone" \
+  "the refusal for a non-home directory still points at --force; see $SCRATCH/recipe-foreign.log"
+check "$(yesno absent "$RECIPEF/.skill-manager/home.runtime.json")" \
+  "the_refused_run_wrote_nothing_into_the_directory_it_refused" \
+  "$RECIPEF/.skill-manager gained a descriptor on a run that exited $FOREIGN_RC"
+
 # --------------------------------- 5b. the cheap path: `wt`, and its contract
 #
 # The output an agent acts on. `new-change.sh` closing banner was ~25 lines of
@@ -949,36 +1055,56 @@ check "$(yesno test "$NEW_RC" = 0)" \
   "wt_new_creates_the_worktree_and_its_home_in_one_command" \
   "wt new exited $NEW_RC; see $SCRATCH/wt-new.err"
 
-# Every line of stdout is a contract line. This is the assertion that the ~25
-# lines of prose are gone rather than merely reordered — the clone report alone
-# was ten lines, and it reached stdout until `home clone` was redirected.
-UNKEYED=""
-CONTRACT_LINES=0
-while IFS= read -r line; do
-  [ -n "$line" ] || continue
-  CONTRACT_LINES=$((CONTRACT_LINES + 1))
-  case "$line" in
-    WORKTREE*|BRANCH*|LAUNCH*|IF-EXIT-8*|CLOSE*|PROPAGATE*) : ;;
-    *) UNKEYED="${UNKEYED}      $line"$'\n' ;;
-  esac
-done < "$SCRATCH/wt-new.out"
+# ---- ONE LINE, and the path is on it.
+#
+# The budget and the evidence in the SAME check, always, and here it is not a
+# style preference — three tests in this file have already been caught passing
+# because the thing they measured printed nothing at all. "wt new's console is
+# one line" is satisfied perfectly by a `wt` that exits 0 in silence, and by one
+# that prints `created worktree ` with an empty path. So the assertion is: ONE
+# line on stdout, NOTHING on stderr, and the path on that line is a directory
+# that exists.
+#
+# Measured before this change, on the fixture below: 5 lines / 746 bytes, of
+# which four restated the first — LAUNCH and IF-EXIT-8 are
+# <WORKTREE>/.skill-manager/... by construction, CLOSE is the command the caller
+# typed the other half of, BRANCH is feature/<TICKET>. IF-EXIT-8 was the most
+# expensive of them and the least often useful: a remedy for a gate that had not
+# fired, paid for on every run in which it never fires.
+WT_LINE_V="$(command sed -n 's/^created worktree //p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+new_is_one_line_naming_a_real_worktree() {
+  [ "$(lines_of "$SCRATCH/wt-new.out")" = 1 ] || return 1
+  [ "$(lines_of "$SCRATCH/wt-new.err")" = 0 ] || return 1
+  [ -n "$WT_LINE_V" ] && [ -d "$WT_LINE_V" ]
+}
+check "$(yesno new_is_one_line_naming_a_real_worktree)" \
+  "a_successful_wt_new_costs_one_line_AND_that_line_names_the_worktree" \
+  "stdout $(lines_of "$SCRATCH/wt-new.out") line(s), stderr $(lines_of "$SCRATCH/wt-new.err") line(s),
+      worktree '${WT_LINE_V:-<none>}' (is a directory: $(yesno test -d "${WT_LINE_V:-/nonexistent}")). stdout was:
+$(command sed 's/^/        /' "$SCRATCH/wt-new.out")"
 
-check "$(yesno test -z "$UNKEYED")" \
-  "wt_new_puts_nothing_but_the_contract_on_stdout" \
-  "these lines are on stdout and are not contract lines:
-$UNKEYED"
-check "$(yesno test "$CONTRACT_LINES" -ge 4)" \
-  "the_contract_has_the_lines_the_next_checks_read" \
-  "only $CONTRACT_LINES contract line(s); the per-key checks below would prove nothing"
+# And the four keys are ANSWERABLE, not merely derivable-in-principle. This is
+# what makes dropping them from the constant path a move rather than a loss:
+# every one of them is still a runnable path, one command away, and that command
+# creates and removes nothing.
+INFO_RC=0
+( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" info W1 ) \
+  > "$SCRATCH/wt-info.out" 2> "$SCRATCH/wt-info.err" || INFO_RC=$?
+check "$(yesno test "$INFO_RC" = 0)" \
+  "wt_info_answers_for_a_worktree_that_exists" \
+  "wt info exited $INFO_RC; see $SCRATCH/wt-info.err"
 
-WT_LINE_V="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
-LAUNCH_V="$(command sed -n 's/^LAUNCH  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
-CLOSE_V="$(command sed -n 's/^CLOSE  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
-DRIFT_V="$(command sed -n 's/^IF-EXIT-8  *//p' "$SCRATCH/wt-new.out" | command sed -n 1p)"
+INFO_WT_V="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-info.out" | command sed -n 1p)"
+LAUNCH_V="$(command sed -n 's/^LAUNCH  *//p' "$SCRATCH/wt-info.out" | command sed -n 1p)"
+CLOSE_V="$(command sed -n 's/^CLOSE  *//p' "$SCRATCH/wt-info.out" | command sed -n 1p)"
+DRIFT_V="$(command sed -n 's/^IF-EXIT-8  *//p' "$SCRATCH/wt-info.out" | command sed -n 1p)"
 
-check "$(yesno test -d "$WT_LINE_V")" \
-  "the_contract_names_a_worktree_that_exists" \
-  "WORKTREE names '${WT_LINE_V:-<none>}', which is not a directory"
+# The two answers about the same ticket must be the SAME worktree. Without this
+# the summary and the lookup could disagree and every check below would still
+# pass — which is exactly the shape of issue #50.
+check "$(yesno test -n "$INFO_WT_V" -a "$INFO_WT_V" = "$WT_LINE_V")" \
+  "wt_info_names_the_same_worktree_the_one_line_summary_did" \
+  "wt new said '${WT_LINE_V:-<none>}' and wt info said '${INFO_WT_V:-<none>}'"
 
 # "leaves it launchable" is the requirement, so the LAUNCH value is checked as a
 # file that can be executed, not merely as a string that was printed.
@@ -1001,27 +1127,61 @@ check "$(yesno executable "${DRIFT_V%% *}")" \
 # existing worktree used to die with "worktree path already exists" and name the
 # recovery nowhere, which is how an operator reaches for `rm -rf` and skips the
 # close-out gate entirely.
+#
+# A refusal is allowed to cost more than a success — the next move is not
+# derivable from anything — but it is allowed THREE LINES, not the 11 it used
+# to take: `wt` dumped the whole of the child's stderr to the console on every
+# failure, and the reason it went wrong is not the answer to "what do I run".
 DUP_RC=0
 ( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W1 ) \
   > "$SCRATCH/wt-dup.out" 2> "$SCRATCH/wt-dup.err" || DUP_RC=$?
 check "$(yesno test "$DUP_RC" != 0)" \
   "a_second_wt_new_for_the_same_ticket_fails" \
   "it exited 0, so the checks below would be asserting against a success"
-DUP_FAILED="$(command sed -n 's/^FAILED  *//p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
-DUP_FIX="$(command sed -n 's/^FIX  *//p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
-check "$(yesno test -n "$DUP_FAILED")" \
-  "a_failing_run_says_what_failed_in_one_line" \
-  "no FAILED line on stdout; see $SCRATCH/wt-dup.out"
+DUP_FAILED="$(command sed -n 's/^error creating worktree: //p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+DUP_FIX="$(command sed -n 's/^fix: //p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+DUP_LOG="$(command sed -n 's/^log: //p' "$SCRATCH/wt-dup.out" | command sed -n 1p)"
+
+# Budget AND evidence together again: three lines with the reason on them, not
+# three lines of anything.
+dup_is_three_lines_that_say_what_happened() {
+  [ "$(lines_of "$SCRATCH/wt-dup.out")" -le 3 ] || return 1
+  [ "$(lines_of "$SCRATCH/wt-dup.err")" = 0 ] || return 1
+  [ -n "$DUP_FAILED" ]
+}
+check "$(yesno dup_is_three_lines_that_say_what_happened)" \
+  "a_failing_wt_new_costs_three_lines_AND_one_of_them_says_what_failed" \
+  "stdout $(lines_of "$SCRATCH/wt-dup.out") line(s), stderr $(lines_of "$SCRATCH/wt-dup.err") line(s), reason '${DUP_FAILED:-<none>}':
+$(command sed 's/^/        /' "$SCRATCH/wt-dup.out")
+      stderr:
+$(command sed 's/^/        /' "$SCRATCH/wt-dup.err")"
 check "$(yesno executable "${DUP_FIX%% *}")" \
   "a_failing_run_names_one_remedy_that_is_actually_runnable" \
-  "FIX names '${DUP_FIX:-<none>}', whose first token is not an executable file"
+  "fix names '${DUP_FIX:-<none>}', whose first token is not an executable file"
 check "$(yesno contains "close W1" "$DUP_FIX")" \
   "the_remedy_for_an_existing_worktree_is_the_gated_teardown" \
-  "FIX is '$DUP_FIX' — anything but a 'wt close' here routes the operator around the close-out gate"
+  "fix is '$DUP_FIX' — anything but a 'wt close' here routes the operator around the close-out gate"
+
+# THE REASONING MOVED, IT WAS NOT DELETED. A `wt` that simply stopped printing
+# the child's stderr would satisfy every budget above and would have thrown the
+# only diagnosis away; the log line is what makes the saving a relocation. Both
+# halves in one check, because "a log was named" is trivially true of a script
+# that names a path it never wrote.
+TICKET_W1_MARKER="Repository for W1"
+dup_named_a_log_that_holds_the_narration() {
+  [ -n "$DUP_LOG" ] || return 1
+  [ -s "$DUP_LOG" ] || return 1
+  command grep -q "$TICKET_W1_MARKER" "$DUP_LOG"
+}
+check "$(yesno dup_named_a_log_that_holds_the_narration)" \
+  "the_failure_names_a_log_that_exists_and_holds_the_prose_it_replaced" \
+  "log is '${DUP_LOG:-<none>}' (size $(command wc -c < "${DUP_LOG:-/nonexistent}" 2>/dev/null | command tr -d ' ')) and does not contain '$TICKET_W1_MARKER'"
 
 # And the closing half of the pair. The old trailing note printed the literal
 # string `<branch>`, so the one fact still owed after a teardown was the one the
-# operator had to go and look up.
+# operator had to go and look up. It is still owed, and it is still named — as a
+# clause on the one line rather than as a third keyed line, because
+# `feature/<TICKET>` is only the DEFAULT spelling and the path does not carry it.
 CLOSE_RC2=0
 ( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W1 ) \
   > "$SCRATCH/wt-close.out" 2> "$SCRATCH/wt-close.err" || CLOSE_RC2=$?
@@ -1031,10 +1191,19 @@ check "$(yesno test "$CLOSE_RC2" = 0)" \
 check "$(yesno absent "$WT_LINE_V")" \
   "wt_close_actually_removed_it" \
   "$WT_LINE_V is still there after a close that reported success"
-DELETE_V="$(command sed -n 's/^DELETE  *//p' "$SCRATCH/wt-close.out" | command sed -n 1p)"
-check "$(yesno contains "feature/W1" "$DELETE_V")" \
-  "the_closing_contract_names_the_branch_it_left_behind" \
-  "DELETE is '${DELETE_V:-<none>}' — the branch outlives the worktree, so naming it is the whole remaining move"
+CLOSED_LINE="$(command sed -n 1p "$SCRATCH/wt-close.out")"
+close_is_one_line_naming_the_worktree_and_the_branch() {
+  [ "$(lines_of "$SCRATCH/wt-close.out")" = 1 ] || return 1
+  [ "$(lines_of "$SCRATCH/wt-close.err")" = 0 ] || return 1
+  contains "$WT_LINE_V" "$CLOSED_LINE" || return 1
+  contains "feature/W1" "$CLOSED_LINE"
+}
+check "$(yesno close_is_one_line_naming_the_worktree_and_the_branch)" \
+  "a_successful_wt_close_costs_one_line_AND_that_line_names_the_worktree_and_the_dangling_branch" \
+  "stdout $(lines_of "$SCRATCH/wt-close.out") line(s), stderr $(lines_of "$SCRATCH/wt-close.err") line(s); the line was:
+      $CLOSED_LINE
+      it must name both $WT_LINE_V and feature/W1 — the branch outlives the worktree,
+      so which branch that is, is the whole remaining move"
 
 # ------------------------------- 5c. the two contract key sets are EXCLUSIVE
 #
@@ -1050,7 +1219,7 @@ step "wt close --force reports one outcome, not both"
 FORCED_WT=""
 ( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" new W2 ) \
   > "$SCRATCH/wt-new2.out" 2> "$SCRATCH/wt-new2.err" || true
-FORCED_WT="$(command sed -n 's/^WORKTREE  *//p' "$SCRATCH/wt-new2.out" | command sed -n 1p)"
+FORCED_WT="$(command sed -n 's/^created worktree //p' "$SCRATCH/wt-new2.out" | command sed -n 1p)"
 
 # Work the gate must block on: a unit the PROJECT home has never seen. Without
 # it the forced path is never reached and the check below measures the clean
@@ -1073,12 +1242,46 @@ has_key() { command grep -qE "^$1[[:space:]]" "$2"; }
 check "$(yesno test "$BLOCK_RC" != 0)" \
   "the_gate_blocks_the_unforced_close_so_the_forced_one_has_something_to_override" \
   "wt close exited $BLOCK_RC with a unit only the worktree home holds; see $SCRATCH/wt-block.err"
-check "$(yesno has_key FAILED "$SCRATCH/wt-block.out")" \
-  "a_blocked_close_puts_the_failure_key_set_on_stdout" \
-  "no FAILED line; see $SCRATCH/wt-block.out"
+# A refused close is the failure a `wt` caller meets most often, so it gets its
+# own budget as well as its own shape. Three lines, and the second of them is
+# the FIRST BLOCKER'S OWN REMEDY — the command that clears the thing the gate
+# stopped on, not `--force`, which is always available and always the wrong one
+# to lead with. Measured before: 25 lines / 3.3 KB, of which 23 were the gate's
+# transcript printed a second time.
+BLOCK_REASON="$(command sed -n 's/^error closing worktree: //p' "$SCRATCH/wt-block.out" | command sed -n 1p)"
+BLOCK_FIX="$(command sed -n 's/^fix: //p' "$SCRATCH/wt-block.out" | command sed -n 1p)"
+BLOCK_LOG="$(command sed -n 's/^log: //p' "$SCRATCH/wt-block.out" | command sed -n 1p)"
+block_is_three_lines_that_say_what_happened() {
+  [ "$(lines_of "$SCRATCH/wt-block.out")" -le 3 ] || return 1
+  [ "$(lines_of "$SCRATCH/wt-block.err")" = 0 ] || return 1
+  [ -n "$BLOCK_REASON" ]
+}
+check "$(yesno block_is_three_lines_that_say_what_happened)" \
+  "a_blocked_close_costs_three_lines_AND_one_of_them_says_why_it_refused" \
+  "stdout $(lines_of "$SCRATCH/wt-block.out") line(s), stderr $(lines_of "$SCRATCH/wt-block.err") line(s), reason '${BLOCK_REASON:-<none>}':
+$(command sed 's/^/        /' "$SCRATCH/wt-block.out")
+      stderr:
+$(command sed 's/^/        /' "$SCRATCH/wt-block.err")"
+check "$(yesno contains "home sync" "$BLOCK_FIX")" \
+  "the_remedy_on_a_refused_close_is_the_blockers_own_not_force" \
+  "fix is '${BLOCK_FIX:-<none>}' — `--force` is always true and is the one that DESTROYS the work,
+      so a refusal that leads with it teaches the operator to discard"
+# And the gate's transcript — the list of what would be lost — is not gone, it
+# is in the file the third line names. Named-and-empty is the failure this pair
+# exists to catch: an assertion phrased as "a log was named" passes over a path
+# that was never written.
+block_named_a_log_holding_the_blocker() {
+  [ -n "$BLOCK_LOG" ] || return 1
+  [ -s "$BLOCK_LOG" ] || return 1
+  command grep -q 'forced-wt-only-unit' "$BLOCK_LOG"
+}
+check "$(yesno block_named_a_log_holding_the_blocker)" \
+  "the_refusal_names_a_log_that_holds_the_blocking_unit_it_no_longer_prints" \
+  "log is '${BLOCK_LOG:-<none>}' and does not name forced-wt-only-unit"
+
 check "$(yesno test "$(yesno has_key CLOSED "$SCRATCH/wt-block.out")" = 0)" \
   "a_blocked_close_does_not_also_claim_it_closed" \
-  "CLOSED and FAILED on the same refusing run; see $SCRATCH/wt-block.out"
+  "CLOSED and a refusal on the same run; see $SCRATCH/wt-block.out"
 
 FORCE_RC2=0
 ( cd "$CHEAP" && bare bash "$SCRIPT_DIR/wt" close W2 --force ) \
@@ -1901,6 +2104,7 @@ check "$(yesno same_file "$HELP_SUBJ_BEFORE" "$SCRATCH/help-typo-after.txt")" \
 HELP_SWEPT=0
 HELP_ACTED=""
 HELP_NOUSAGE=""
+HELP_WRONGNAME=""
 HELP_SWEEP_BEFORE="$SCRATCH/help-sweep-before.txt"
 listing "$HELPP/sweep" > "$HELP_SWEEP_BEFORE"
 for f in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt"; do
@@ -1919,6 +2123,20 @@ for f in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt"; do
   if [ "$hrc" != 0 ] || ! command grep -q '^usage:' "$SCRATCH/help-sweep-$n.log"; then
     HELP_NOUSAGE="$HELP_NOUSAGE $n(rc=$hrc)"
   fi
+  # ITS OWN usage, and this is the half that was missing.
+  #
+  # agent-home.sh `exec`s bootstrap-home.sh and forwarded "$@" verbatim, so
+  # `agent-home.sh --help` printed `usage: bootstrap-home.sh …` — a different
+  # program's name, a different option set, and no word about the two facts a
+  # caller of agent-home.sh needs (that it is a locator, and that --print-env is
+  # how a shell binds). It satisfied `^usage:` perfectly, which is why the check
+  # above did not see it, and it cost a fresh agent ~4.5 KB reading the same
+  # help twice under two names before noticing they were one text.
+  #
+  # `usage: <name>` rather than "mentions its name somewhere": the defect's
+  # output mentioned agent-home.sh in prose further down and would have passed.
+  command grep -q "^usage: $n\([[:space:]]\|$\)" "$SCRATCH/help-sweep-$n.log" \
+    || HELP_WRONGNAME="$HELP_WRONGNAME $n(said: $(command sed -n 's/^usage: //p' "$SCRATCH/help-sweep-$n.log" | command sed -n 1p | command awk '{print $1}'))"
 done
 
 # Vacuity guard for the sweep itself, in this file's usual shape: a loop that
@@ -1932,8 +2150,13 @@ check "$(yesno test -z "$HELP_ACTED")" \
   "no_entry_point_writes_anything_when_asked_for_help" \
   "these changed the caller's directory on --help:$HELP_ACTED"
 check "$(yesno test -z "$HELP_NOUSAGE")" \
-  "every_entry_point_answers_help_with_its_own_usage_and_exit_0" \
+  "every_entry_point_answers_help_with_a_usage_and_exit_0" \
   "these did not:$HELP_NOUSAGE"
+check "$(yesno test -z "$HELP_WRONGNAME")" \
+  "every_entry_point_answers_help_with_ITS_OWN_usage_not_some_other_scripts" \
+  "these printed a usage line naming a different program:$HELP_WRONGNAME
+      A locator that forwards --help to the thing it execs answers a question
+      about a program the caller did not run."
 
 # --------------------- no refusal here claims a fact it did not measure
 #

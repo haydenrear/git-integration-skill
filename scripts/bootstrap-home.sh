@@ -892,6 +892,21 @@ ensure_cli_pin() {
   file; do not re-run and hope."
 }
 
+# Is there a HOME at this path — as opposed to merely a directory?
+#
+# The CLI's own structural test, restated verbatim so the two cannot disagree
+# about the case that matters: "A home carries a home.runtime.json descriptor,
+# or an installed/ and a skills/ directory." Anything else at $STORE is someone
+# else's directory, and the difference decides whether --force means "re-run the
+# steps on an existing home" or is simply the wrong answer. No CLI start: this
+# is asked before the CLI has been probed, and it is a question about the
+# filesystem.
+home_looks_bootstrapped() {
+  [ -e "$1/home.runtime.json" ] && return 0
+  [ -d "$1/installed" ] && [ -d "$1/skills" ] && return 0
+  return 1
+}
+
 bootstrapped=0; frozen_skip=0
 # Whether THIS run actually ran `home clone`. Distinct from `bootstrapped`, and
 # the distinction is the #38 defect: the closing caveat about skipped directories
@@ -936,13 +951,53 @@ if [ "$bootstrapped" = 0 ]; then
     # than letting it fail after the guard work is done.
     [ -d "$STORE" ] || die "$STORE exists and is not a directory"
     if [ -n "$(ls -A "$STORE" 2>/dev/null)" ]; then
-      # --force re-runs the steps AFTER the clone on an existing live home. It
-      # never re-clones: a second clone over a home an agent has been editing
-      # would be the destructive interpretation of the word.
-      [ "$FORCE" = 1 ] \
-        || die "$STORE exists and is not empty — inspect it, then pass --force to re-run the steps on it, or remove it"
-      need_clone=0
-      say "existing:  $STORE (--force: re-running the steps, not re-cloning)"
+      # NON-EMPTY IS NOT THE SAME AS "IS A HOME". Conflating them is the defect
+      # a fresh agent hit on the FIRST command of the documented recipe.
+      #
+      # skill-project.toml used to say `mkdir -p .skill-manager/skills` and then
+      # run this script. That mkdir makes $STORE non-empty without making it a
+      # home, and both arms below were wrong for it:
+      #
+      #   without --force  "pass --force to re-run the steps on it" — advice
+      #                    that makes it WORSE, because
+      #   with --force     the clone is skipped, and three steps later `home
+      #                    policy --live` refuses with "is not a Skill Manager
+      #                    home (it exists but carries neither a descriptor nor
+      #                    the installed/ + skills/ pair)" and exit 1. Measured.
+      #
+      # So the question asked here is the one the answer depends on: is there a
+      # HOME here? `home_looks_bootstrapped` is deliberately structural — the
+      # same descriptor-or-pair test the CLI applies — because "an agent has
+      # been editing this" is exactly what --force must not re-clone over, and
+      # "someone ran mkdir" is exactly what it must.
+      if home_looks_bootstrapped "$STORE"; then
+        # --force re-runs the steps AFTER the clone on an existing live home. It
+        # never re-clones: a second clone over a home an agent has been editing
+        # would be the destructive interpretation of the word.
+        [ "$FORCE" = 1 ] \
+          || die "$STORE exists and is not empty — inspect it, then pass --force to re-run the steps on it, or remove it"
+        need_clone=0
+        say "existing:  $STORE (--force: re-running the steps, not re-cloning)"
+      elif [ -z "$(command find "$STORE" \! -type d 2>/dev/null | command head -n 1)" ]; then
+        # Directories and nothing else — `mkdir -p .skill-manager/skills`, or the
+        # same habit spelled some other way. Nothing here can be lost, so the
+        # empty shells are pruned and the clone proceeds. `-depth -type d -empty`
+        # removes only directories that are already empty, bottom-up, and stops
+        # at $STORE itself, which `home clone` accepts as a destination.
+        say "existing:  $STORE (empty directories only — pruning them and cloning)"
+        command find "$STORE" -mindepth 1 -depth -type d -empty -delete 2>/dev/null || true
+        [ -z "$(ls -A "$STORE" 2>/dev/null)" ] \
+          || die "$STORE still has entries after pruning empty directories — inspect it and remove it"
+      else
+        # Files, but not a home. --force is the wrong remedy and saying so is the
+        # whole point: it would skip the clone and leave a directory that is not
+        # a home to fail three steps later with a message about descriptors.
+        die "$STORE holds files but is not a Skill Manager home (no home.runtime.json,
+  and no installed/ + skills/ pair). --force will NOT help: it re-runs the steps on an
+  EXISTING home and would skip the clone, leaving this directory exactly as it is.
+  Inspect it, move it aside, and re-run — this script creates the home itself, so
+  nothing needs to be created here first."
+      fi
     fi
   fi
 
