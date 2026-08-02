@@ -59,8 +59,11 @@ usage() {
 usage: close-change.sh <TICKET|WORKTREE-PATH> [--into HOME] [--force] [--dry-run]
 
   TICKET           Ticket id; the worktree is <parent-dir>/<repo>-<TICKET>,
-                   the same path new-change.sh creates. A path may be given
-                   instead.
+                   the same path new-change.sh creates. If that path is not
+                   there, the ticket is resolved against the worktrees that
+                   ARE — so this runs from any directory, not only from the
+                   repo that opened the worktree. Ambiguity is named, never
+                   guessed. A path may be given instead.
   --into HOME      Project home the worktree's work must reach first.
                    Default: the project home the worktree's own home was cloned
                    FROM — <main working tree>/.skill-manager. bootstrap-home.sh
@@ -109,12 +112,58 @@ cd "$ROOT"
 
 # A path if it looks like one or exists; otherwise the new-change.sh
 # convention, computed by the SAME helper so the two cannot drift apart.
+#
+# AND THEN, IF THAT PATH IS NOT THERE, THE TICKET IS RESOLVED AGAINST THE
+# WORKTREES THAT ACTUALLY EXIST. The convention alone made this command
+# cwd-sensitive: it spells the worktree `<parent>/<basename $ROOT>-<TICKET>` and
+# $ROOT is the nearest git toplevel to $PWD, so `wt close B1-EDIT` run from a
+# repo that is not the one that opened B1-EDIT composed a path out of the wrong
+# repo's name and refused with `not a directory: …/skill-manager-B1-EDIT`. The
+# contract prints that close command as a bare absolute path with no `cd`, which
+# says run-from-anywhere; making it true is cheaper than qualifying it, and a
+# `cd` prefix would still be wrong for a caller that does not know which repo to
+# cd to — which is the caller this whole front door is for.
+#
+# Only ever consulted when the conventional path is ABSENT, so the ordinary
+# in-repo case is unchanged and cannot be redirected by a sibling with the same
+# ticket id.
 case "$TARGET" in
   */*|.|..) WT="$TARGET" ;;
-  *)        WT="$(ticket_worktree_path "$ROOT" "$TARGET")" ;;
+  *)        WT="$(ticket_worktree_path "$ROOT" "$TARGET")"
+            if [ ! -d "$WT" ]; then
+              FOUND="$(ticket_worktree_candidates "$(worktree_parent_dir "$ROOT")" "$TARGET")"
+              N_FOUND="$(printf '%s\n' "$FOUND" | command grep -c . || true)"
+              if [ "$N_FOUND" = 1 ]; then
+                WT="$(printf '%s\n' "$FOUND" | command sed -n 1p)"
+                info "resolved:  $TARGET -> $WT"
+                info "           (not $(basename "$ROOT")'s worktree — the repo \$PWD is in does not own this ticket)"
+              elif [ "${N_FOUND:-0}" -gt 1 ]; then
+                # Named, never guessed. Two repos can legitimately carry the same
+                # ticket id in one integration tree, and closing the wrong one
+                # destroys a home.
+                printf '%s\n' "$FOUND" | while IFS= read -r c; do
+                  [ -n "$c" ] && printf '    %s\n' "$c" >&2
+                done
+                die_fix 1 "$SCRIPT_DIR/wt close <one of the paths in the log>" \
+                  "$N_FOUND worktrees are named $TARGET (each one named in the log) — name the one you mean by path"
+              fi
+            fi ;;
 esac
-[ -d "$WT" ] || die "not a directory: $WT"
+[ -d "$WT" ] || die "not a directory: $WT
+  That is where new-change.sh would have put $TARGET for $(basename "$ROOT"), the repo
+  \$PWD is in, and no worktree named '*-$TARGET' exists in
+    $(worktree_parent_dir "$ROOT")
+  either. Check the ticket id, or name the worktree by path."
 WT="$(cd "$WT" && pwd -P)"
+
+# THE WORKTREE DECIDES WHICH REPO THIS IS, not $PWD. Re-derived here because the
+# resolution above may have landed on another repo's worktree entirely, and
+# because every remaining question — is it really a worktree, which project home
+# does it close INTO, which branch is left dangling — is a question about the
+# repo the WORKTREE belongs to. Deriving it from $PWD is what made the whole
+# command cwd-sensitive.
+ROOT="$(main_checkout_root "$WT")" || die "cannot resolve the main working tree for $WT"
+cd "$ROOT"
 
 [ "$WT" = "$ROOT" ] && die "refusing to remove the repo's main working tree ($ROOT)"
 
@@ -145,6 +194,13 @@ STORE="$WT/.skill-manager"
 # caller — and `<branch>` as a literal placeholder, which is what the old
 # trailing note printed, is not that fact.
 WT_BRANCH="$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+
+# Same reason: after the removal there is no home to ask. Whether this worktree
+# HAD one decides whether the closing contract owes the caller the last-mile
+# note below — a worktree created with --no-home reconciled nothing anywhere and
+# telling it that its work reached the project home would be false.
+HAD_HOME=0
+[ -d "$STORE" ] && HAD_HOME=1 || true
 
 # The destination is the PROJECT home — the main working tree's — and it is
 # derived from the same lib.sh function bootstrap-home.sh clones the worktree
@@ -489,8 +545,45 @@ if [ -n "$WT_BRANCH" ]; then
   contract DELETE "git -C $ROOT branch -d $WT_BRANCH"
 fi
 
+# THE LAST MILE, WHICH THIS TEARDOWN USED TO LEAVE UNSAID.
+#
+# The gate above is about whether removing the worktree would DESTROY work, and
+# the remedy it names is `home sync`. What `home sync` does is move an edit ONE
+# TIER UP — from `<worktree>/.skill-manager` into this checkout's own project
+# home — and that is the whole of it. Two fresh-agent evals noticed the gap
+# unprompted, from opposite directions: the edit is not in the skill's own
+# repository, so a later reinstall or upgrade of that unit overwrites it and no
+# other checkout ever sees it; and the push cannot be done from the worktree
+# anyway, because the copy of the skill that holds the edit is inside a home
+# that is being deleted in the same breath.
+#
+# So the successful close states where the work now is and what it still owes.
+# A key, not a paragraph on stderr: the removal is exactly the moment the
+# obligation becomes invisible — the home is gone and the loss appears in no
+# diff — and `wt` carries it onto its one line for the same reason. See
+# git-integration-skill#8.
+[ "$HAD_HOME" = 0 ] || contract HOME-WORK \
+  "$INTO (as far as \`home sync\` moves it — this checkout only. A skill edit is not in that skill's OWN repository until it is pushed from $ROOT, and until then a reinstall can overwrite it and no other checkout sees it.)"
+
 cat >&2 <<EOF
 
 The branch is still here. Delete it when the change has landed:
   git -C "$ROOT" branch -d ${WT_BRANCH:-<branch>}
+EOF
+
+[ "$HAD_HOME" = 0 ] || cat >&2 <<EOF
+
+Where this worktree's HOME work now lives, and what it still owes:
+  $INTO
+That is one tier up, and one tier only. \`skill-manager home sync\` reconciles a
+worktree home into the checkout's own home; it does NOT push a skill edit back
+to that skill's repository, and \`propagate.sh\` does not either — propagate
+fans out the PARENT's tracked files, and a home is gitignored.
+So if you edited a skill in that worktree:
+  * the edit is now in $INTO and nowhere else,
+  * a later \`skill-manager install\`/\`upgrade\`/\`sync\` of that unit can
+    overwrite it, and no other checkout will ever see it,
+  * push it from $ROOT — not from a worktree, whose copy of the skill lived in
+    the home that has just been deleted.
+See references/skill-homes.md.
 EOF

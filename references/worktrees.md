@@ -11,16 +11,28 @@ ticket and a worktree, but no submodules** — the worktree is just files.
 <this-skill>/scripts/wt close TICKET-123
 ```
 
-Run it from anywhere inside the repo you want branched. It resolves the repo,
-creates the worktree, gives it its own Skill Manager home, and answers in **one
-line**:
+`wt` **is not on `PATH`** — invoke it by absolute path, which is how every
+command in this repo prints itself, including the `CLOSE` key. Run `new` from
+anywhere inside the repo you want branched. It resolves the repo, creates the
+worktree, gives it its own Skill Manager home, and answers in **one line**:
 
 ```
 created worktree /repos/deploy-helm-TICKET-123
-closed worktree /repos/deploy-helm-TICKET-123 (branch feature/TICKET-123 kept)
+closed worktree /repos/deploy-helm-TICKET-123 (branch feature/TICKET-123 kept; home work went no further than /repos/deploy-helm/.skill-manager — push skill edits from there)
 ```
 
-That is the whole successful output, on stdout, with nothing on stderr.
+That is the whole successful output, on stdout. Nothing is on stderr unless the
+run is slow enough to need waiting on — see *How long it takes* below.
+
+`close` and `info` run from **anywhere at all**, including a completely
+different repository: a bare ticket is first tried as
+`<parent>/<this repo>-<TICKET>` and, failing that, resolved against the
+worktrees that actually exist in the directory ticket worktrees go in. Both used
+to compose the path out of whatever repo `$PWD` was in and refuse with
+`not a directory: /repos/some-other-repo-TICKET-123` — which reads as "no such
+ticket" when what was wrong was the directory. One resolver serves both verbs,
+so `wt info T` and `wt close T` cannot answer about different worktrees. Two
+worktrees sharing a ticket id are **named, never guessed between**.
 
 ### Why one line, and where the rest went
 
@@ -32,9 +44,22 @@ Everything else follows from the path *by construction*:
 | where to edit | the path |
 | the launcher | `<worktree>/.skill-manager/bin/launch/claude` |
 | the drift-gate remedy, if `LAUNCH` refuses with **exit 8** | `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack` |
-| the teardown | `wt close TICKET-123` — the other half of what you just typed |
+| the teardown | `<this-skill>/scripts/wt close TICKET-123` — the other half of what you just typed |
 | the branch | `feature/TICKET-123`, and `wt close` names it when it differs |
+| where the worktree's HOME work ended up, and what it still owes | the `HOME-WORK` key, and the clause `wt close` puts on its one line |
 | the constituent fan-out (integration repos) | `propagate.sh TICKET-123` |
+
+`HOME-WORK` is the one key that is *not* derivable, which is why it is on the
+one line rather than on demand. `skill-manager home sync` — the remedy the close
+gate names — moves a worktree's unit work **one tier up**, into this checkout's
+own home, and stops there. It does not push a skill edit back to that skill's
+repository, and `propagate.sh` does not either (it fans out the parent's
+*tracked* files; a home is gitignored). So after a close the edit exists in one
+place, a later `install`/`upgrade`/`sync` of that unit can overwrite it, and no
+other checkout will ever see it. Push it from the **main checkout** — from a
+worktree the skill's upstream is the wrong target anyway, since the copy holding
+the edit lived in the home that was just deleted. See
+`references/skill-homes.md`, and git-integration-skill#8.
 
 `wt new` and `wt close` run constantly, and four long absolute paths restating
 the fifth is a cost paid on every one of them. `IF-EXIT-8` was the clearest
@@ -45,11 +70,56 @@ never fires.
 same `KEY  value` contract as before, by any of:
 
 ```bash
-wt info TICKET-123           # a worktree that exists; creates and removes nothing
-wt new TICKET-123 --verbose  # on the run that creates it
-wt close TICKET-123 --dry-run   # CLEAN / CLOSE — would this close cleanly?
-wt close TICKET-123 --force     # CLOSED / BRANCH / DELETE, plus what it discarded
+<this-skill>/scripts/wt info TICKET-123              # a worktree that exists; creates and removes nothing
+<this-skill>/scripts/wt new TICKET-123 --verbose     # on the run that creates it
+<this-skill>/scripts/wt close TICKET-123 --dry-run   # CLEAN / CLOSE — would this close cleanly?
+<this-skill>/scripts/wt close TICKET-123 --force     # CLOSED / BRANCH / DELETE / HOME-WORK, plus what it discarded
 ```
+
+### How long it takes, and how to wait for it
+
+`new` is dominated by copying the Skill Manager home, so its cost tracks the
+**source home**, not the repo. Measured on one machine against an 18-unit /
+852 MB project home:
+
+| phase | before | after |
+|---|---|---|
+| `skill-manager home clone`, end to end (40307 files, 852 MB) | 33.6 s | 33.7 s |
+| the other CLI calls (policy, shims, descriptor, drift, `exec --print-env`) | ~14 s | ~14 s |
+| **`descriptor_env_dirs` called from inside per-unit shell loops** | **~109 s** | **~0 s** (asked once, in the row above) |
+| **total (`bootstrap-home.sh` on the same home)** | **158.7 s** | **49.6 s** |
+| **total (`wt new`, worktree + home)** | **151.7 s** | **48.0 s** |
+
+That third row was the whole problem. The agent-home directories are read from
+the descriptor by starting the CLI (a JVM, ~1.4 s), and `unprojected_pairs` and
+`projected_unit_count` each expanded `$(projection_dirs)` **once per unit** —
+18 units × 1.4 s per call, four such calls in a bootstrap. It is a pure function
+of the home and the root, so it is now asked once per run. Nothing about what is
+checked changed: `verified: N skill(s) servable` still means every store unit is
+reachable from every declared agent home by a link that resolves inside the
+checkout.
+
+What is left is not reducible **from here**. Two thirds of it is
+`skill-manager home clone`, whose code is in that repo, and it is copying
+rather than cloning: measured on the same 696 MB subtree of the same home,
+`cp -Rc` (APFS `clonefile`) takes **11.2 s** and `cp -R` takes **26.0 s**, and
+`home clone` runs at the second speed. Copy-on-write would take ~17 s per
+worktree off every `wt new` on this machine, and it is a `skill-manager`
+change, not one this repo can make. The remaining ~14 s is nine CLI starts,
+each of which is asked exactly one question that only the CLI can answer.
+
+**Nothing is printed until the run finishes** — the contract is emitted
+atomically at the end, which is what makes the one-line summary possible. So if
+a run may outlast a caller's timeout, do not background it and poll: polling
+re-reads the whole transcript every time, while
+
+```
+still running after 25s (new TICKET-123) — watch: tail -f /tmp/wt-a1b2c3-run.log
+```
+
+is printed once, on **stderr**, by any run that passes `WT_PROGRESS_AFTER`
+seconds (default 25, `0` silences it). A fast run prints nothing on stderr, as
+before — the line exists only for the runs that created the problem it solves.
 
 `new-change.sh` and `close-change.sh` emit that contract unchanged; `wt`
 summarises it. **The keys are still the interface, not the path.**

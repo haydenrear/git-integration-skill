@@ -529,6 +529,16 @@ first, weaker half of that (the edit reaches the *project home*) and will not
 let a bare removal skip it; getting the edit to the skill's own repo is still
 this push-back flow, and still yours to run.
 
+**And it now says so at the moment it matters.** A successful close prints a
+`HOME-WORK` key naming the project home the work reached, and `wt close` carries
+it onto its one line as `push skill edits from there`. That is why it is printed
+at teardown rather than documented only here: the teardown is exactly when the
+obligation becomes invisible — the worktree home is deleted, the loss appears in
+no diff, and until this key existed nothing in the workflow mentioned it
+(git-integration-skill#8). Note the direction too: push from the **main
+checkout**. From a worktree the skill's upstream is the wrong target, because
+the copy of the skill that holds the edit lives in the home being removed.
+
 The reverse mistake is just as bad: a skill lives in its own repo, so editing
 its copy under `constituents/<skill>/` and propagating that is the *parent*
 flow, and it is the right one when you are changing the skill as a constituent

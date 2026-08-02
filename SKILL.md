@@ -108,18 +108,39 @@ cost an agent two commands and no reading. It does:
 <this-skill>/scripts/wt close TICKET-123     # teardown, through the close-out gate
 ```
 
+**`wt` is not on `PATH`.** Every spelling on this page begins with
+`<this-skill>/scripts/` for that reason: the line as printed has to be the line
+that runs, and a bare `wt` is not one. The `CLOSE` key `new-change.sh` prints is
+an absolute path for the same reason — and it is runnable **from any
+directory**, because `close` and `info` resolve a ticket against the worktrees
+that exist rather than against the repo you happen to be standing in.
+
 **A successful run costs one line, and the path on it is the answer.**
 
 ```
 created worktree /path/to/repo-TICKET-123
-closed worktree /path/to/repo-TICKET-123 (branch feature/TICKET-123 kept)
+closed worktree /path/to/repo-TICKET-123 (branch feature/TICKET-123 kept; home work went no further than /path/to/repo/.skill-manager — push skill edits from there)
 ```
+
+That second clause is the one thing a teardown cannot leave unsaid: the worktree
+home is deleted with the worktree, `home sync` moves an edit exactly one tier up
+into *this checkout's* home, and no further. A skill edit is not in that skill's
+own repository until you push it — from the main checkout, never from a worktree
+whose copy of the skill has just been deleted (git-integration-skill#8).
+
+**`new` takes as long as copying the home takes.** Measured here: ~48 s against
+an 18-unit / 852 MB project home, seconds against a small one — and nothing is
+printed until it finishes. If that may outlast your timeout, do not background
+it and poll: once a run passes `WT_PROGRESS_AFTER` seconds (default 25) `wt`
+prints one line on stderr naming a log file, and `tail -f` on that file shows
+the phases live at constant cost.
 
 Everything else follows from that path by construction, so it is not printed:
 the launcher is `<worktree>/.skill-manager/bin/launch/claude`, the drift-gate
 remedy is `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack`,
-and the teardown is `wt close TICKET-123`. When you want them spelled out — for
-a worktree that already exists, creating and removing nothing:
+and the teardown is `<this-skill>/scripts/wt close TICKET-123`. When you want
+them spelled out — for a worktree that already exists, creating and removing
+nothing:
 
 ```bash
 <this-skill>/scripts/wt info TICKET-123    # WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE
@@ -139,8 +160,8 @@ full. Read it when the `fix:` line is not enough, and not before.
 `wt` holds no policy of its own — it picks a verb, suppresses the prose, and
 summarises the contract that `new-change.sh` and `close-change.sh` emit. Those
 two remain the implementation and remain a matched pair (issue #50), and the
-whole key set is still printed by `wt info`, `wt … --verbose`, `wt close
---dry-run` and `wt close --force`. The rest of this page and
+whole key set — now including `HOME-WORK` — is still printed by `wt info`,
+`wt … --verbose`, `wt close --dry-run` and `wt close --force`. The rest of this page and
 `references/worktrees.md` explain *why* each line is what it is; the happy path
 does not need them.
 
