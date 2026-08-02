@@ -85,6 +85,11 @@ exists()    { [ -e "$1" ]; }
 absent_pattern() { ! command grep -q "$1" "$2"; }
 absent_substring() { ! contains "$1" "$2"; }
 absent()    { [ ! -e "$1" ]; }
+# `diff -q` writes "Files … differ" to STDOUT, so a bare `yesno command diff -q`
+# nested inside another substitution captures that sentence along with the
+# verdict and the outer test compares a paragraph to a digit. Measured here.
+same_file()    { command diff -q "$1" "$2" >/dev/null 2>&1; }
+differs_file() { ! same_file "$1" "$2"; }
 executable() { [ -n "${1:-}" ] && [ -f "$1" ] && [ -x "$1" ]; }
 yesno()     { if "$@"; then printf 1; else printf 0; fi; }
 ok()   { PASSED=$((PASSED + 1)); printf '  PASS  %s\n' "$1" >&2; }
@@ -869,6 +874,105 @@ check "$(yesno test -z "$UNKNOWN")" \
   "every_skill_manager_option_this_repo_prints_is_accepted_by_the_cli" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
+
+# ------------------------------- a refusal with nowhere to go names a command
+#
+# The one path a genuinely fresh machine takes: no `~/.skill-manager` at all.
+# `bootstrap-home.sh` refused with `error: source home does not exist: …` and
+# nothing else — correct, and it wrote nothing, but it left the operator holding
+# a checkout, an exit code and no command. Compare the exit-5 path, which prints
+# three alternatives.
+#
+# Two properties, and the second is the more important one: the refusal must
+# name something runnable, AND it must still have written nothing.
+
+step "A refusal from a machine with no home at all names a command"
+
+# A HOME with no `.skill-manager` under it. Deliberately NOT $FAKE_HOME, which
+# is seeded: that is the difference between exit 1 (no source) and exit 5 (an
+# empty source), and conflating them is how the check would measure the path
+# that already had a remedy.
+NOSRC_HOME="$SCRATCH/nosource-home"
+NOSRC_PROJ="$SCRATCH/nosource-proj"
+mkdir -p "$NOSRC_HOME" "$NOSRC_PROJ"
+git -C "$NOSRC_PROJ" init -q -b main
+git -C "$NOSRC_PROJ" config user.email selftest@example.invalid
+git -C "$NOSRC_PROJ" config user.name "selftest"
+printf 'x\n' > "$NOSRC_PROJ/README.md"
+git -C "$NOSRC_PROJ" add -A
+git -C "$NOSRC_PROJ" -c commit.gpgsign=false commit -qm "fixture"
+
+# The "nothing was written" half is asserted against a listing taken BEFORE the
+# run, and the listing is proved live further down by planting a file into a
+# copy of it and watching the comparison notice.
+listing() { command find "$1" -mindepth 1 2>/dev/null | LC_ALL=C sort; }
+NOSRC_BEFORE="$SCRATCH/nosource-before.txt"
+{ listing "$NOSRC_HOME"; listing "$NOSRC_PROJ"; } > "$NOSRC_BEFORE"
+
+NOSRC_RC=0
+env -u SKILL_MANAGER_HOME HOME="$NOSRC_HOME" \
+    JAVA_TOOL_OPTIONS="-Duser.home=$NOSRC_HOME" SKILL_MANAGER_CLI="$CLI" \
+    bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$NOSRC_PROJ" \
+    > "$SCRATCH/nosource.log" 2>&1 || NOSRC_RC=$?
+
+check "$(yesno test "$NOSRC_RC" != 0)" \
+  "a_checkout_with_no_home_above_it_is_refused" \
+  "bootstrap exited 0 with no home to copy from (rc=$NOSRC_RC); see $SCRATCH/nosource.log"
+
+# "Runnable" as a predicate over a log, not as a grep for hopeful words: the
+# first token of a candidate line must be a file this machine can execute, or a
+# name PATH resolves. `error: … does not exist` has a first token of `error:`
+# and fails it, which is the whole point.
+first_runnable() {
+  local log="$1" line cmd
+  while IFS= read -r line; do
+    cmd="$(printf '%s\n' "$line" | command sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*$//')"
+    [ -n "$cmd" ] || continue
+    if [ -f "$cmd" ] && [ -x "$cmd" ]; then printf '%s\n' "$cmd"; return 0; fi
+    if command -v "$cmd" >/dev/null 2>&1; then printf '%s\n' "$cmd"; return 0; fi
+  done < "$log"
+  return 1
+}
+
+# Non-vacuity for the predicate itself, in the same run and in both directions.
+# A predicate that answered "yes" to anything would make the assertion below
+# meaningless, and the refusal it is about is exactly a log full of prose.
+PROSE="$SCRATCH/prose-control.txt"
+cat > "$PROSE" <<'EOF'
+error: source home does not exist: /nowhere/.skill-manager (the global home)
+  There is nothing here that an operator could run.
+EOF
+check "$(yesno test -z "$(first_runnable "$PROSE" || true)")" \
+  "the_runnable_remedy_predicate_rejects_a_refusal_that_is_only_prose" \
+  "the predicate accepted '$(first_runnable "$PROSE" || true)' from a log with no command in it"
+
+NOSRC_FIX="$(first_runnable "$SCRATCH/nosource.log" || true)"
+check "$(yesno test -n "$NOSRC_FIX")" \
+  "the_no_source_refusal_names_a_command_that_exists_on_this_machine" \
+  "no runnable command in the refusal; see $SCRATCH/nosource.log"
+# And the exit-5 refusal, whose remedy was already good, measured by the SAME
+# predicate — so a future edit cannot satisfy one and lose the other.
+EMPTY_FIX="$(first_runnable "$SCRATCH/empty.log" || true)"
+check "$(yesno test -n "$EMPTY_FIX")" \
+  "the_empty_home_refusal_names_a_command_by_the_same_measure" \
+  "the exit-5 remedy stopped being runnable by the predicate the exit-1 one now passes"
+
+check "$(yesno command grep -q 'onboard' "$SCRATCH/nosource.log")" \
+  "the_no_source_refusal_names_the_step_that_creates_the_home_above_this_one" \
+  "\`onboard\` is the command that fills a fresh machine's global home and it is named nowhere"
+
+# The half that matters more than the message. Asserted against the pre-run
+# listing, and then the comparison is proved live: a copy of the baseline with
+# one planted line must NOT compare equal, or "unchanged" means "not looked at".
+{ listing "$NOSRC_HOME"; listing "$NOSRC_PROJ"; } > "$SCRATCH/nosource-after.txt"
+check "$(yesno same_file "$NOSRC_BEFORE" "$SCRATCH/nosource-after.txt")" \
+  "a_refusal_with_no_source_home_writes_nothing_anywhere" \
+  "$(command diff "$NOSRC_BEFORE" "$SCRATCH/nosource-after.txt" | command head -10)"
+command cp "$NOSRC_BEFORE" "$SCRATCH/nosource-planted.txt"
+printf '%s/planted\n' "$NOSRC_HOME" >> "$SCRATCH/nosource-planted.txt"
+check "$(yesno differs_file "$NOSRC_BEFORE" "$SCRATCH/nosource-planted.txt")" \
+  "the_wrote_nothing_comparison_notices_a_planted_file" \
+  "the comparison called a listing with an extra entry identical, so it proves nothing"
 
 # ------------------------------ every scripts/ file this skill names, it ships
 #

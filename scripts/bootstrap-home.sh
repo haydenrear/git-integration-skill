@@ -184,7 +184,53 @@ fi
 
 # -P so a symlinked source and a symlinked target cannot compare unequal
 # while naming the same directory.
-[ -d "$SOURCE" ] || die "source home does not exist: $SOURCE ($SOURCE_ORIGIN)"
+#
+# The refusal names a command. This is the ONE path a genuinely fresh machine
+# takes — no `~/.skill-manager` at all — and it used to end at "source home does
+# not exist", full stop: correct, wrote nothing, and left the operator with
+# nothing to run. The exit-5 path two hundred lines down prints three
+# alternatives; this one printed none.
+#
+# Which command depends on why the source is missing, so it is branched rather
+# than generalised. An explicit --source that does not exist is a typo and
+# `onboard` is the wrong answer to it; a missing GLOBAL home on a fresh machine
+# is the ordinary case and `onboard` is exactly the answer.
+#
+# `onboard` is spelled WITHOUT the agent-home env here, and that is deliberate
+# rather than an oversight of the #145 rule: the home being created is the
+# global one, whose agent directories ARE ~/.claude, ~/.codex and ~/.gemini. The
+# rule is "pin the agent-home env to the home you are writing", and for the
+# global home the default environment already is that pin.
+#
+# `${SKILL_MANAGER_CLI:-skill-manager}` rather than $CLI: pick_cli has not run
+# yet — it cannot, the refusal has to come before any work — so the remedy names
+# the pin if there is one and the PATH spelling if there is not, which is the
+# same order pick_cli itself uses.
+if [ ! -d "$SOURCE" ]; then
+  SM_SPELLING="${SKILL_MANAGER_CLI:-skill-manager}"
+  case "$SOURCE_ORIGIN" in
+    --source)
+      die "source home does not exist: $SOURCE (named with --source)
+  Nothing was read or written. Name a home that exists, or drop --source to use
+  ${SKILL_MANAGER_HOME:+\$SKILL_MANAGER_HOME}${SKILL_MANAGER_HOME:-the global home $GLOBAL_HOME}:
+    $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT' --source '<an existing home>'
+    $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT'" ;;
+    *)
+      die "source home does not exist: $SOURCE ($SOURCE_ORIGIN)
+  Nothing was read or written. A home is a COPY of the home above it, and on a
+  fresh machine the home above a project is the global one — which does not
+  exist yet. \`onboard\` is the step that creates and fills it, and cloning a
+  home never runs it. Two commands, in this order:
+    $SM_SPELLING onboard --skip-gateway
+    $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT'
+  (No agent-home env on that first line, deliberately: the home it creates is
+  the global one, whose agent directories already are ~/.claude, ~/.codex and
+  ~/.gemini. Every other command this script prints pins them, because every
+  other command writes a home that is not the global one.)
+  Or copy a home that already exists somewhere else:
+    $SCRIPT_DIR/bootstrap-home.sh --root '$ROOT' --source '<an existing home>'" ;;
+  esac
+fi
 SOURCE="$(cd "$SOURCE" && pwd -P)"
 
 # The agreement, asserted. Only reachable via an explicit --source, since the
