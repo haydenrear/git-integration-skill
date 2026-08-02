@@ -639,7 +639,7 @@ check "$(yesno executable "${DUP_FIX%% *}")" \
   "FIX names '${DUP_FIX:-<none>}', whose first token is not an executable file"
 check "$(yesno contains "close W1" "$DUP_FIX")" \
   "the_remedy_for_an_existing_worktree_is_the_gated_teardown" \
-  "FIX is '$DUP_FIX' — anything but `wt close` here routes the operator around the close-out gate"
+  "FIX is '$DUP_FIX' — anything but a 'wt close' here routes the operator around the close-out gate"
 
 # And the closing half of the pair. The old trailing note printed the literal
 # string `<branch>`, so the one fact still owed after a teardown was the one the
