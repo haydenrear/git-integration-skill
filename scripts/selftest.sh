@@ -1380,6 +1380,18 @@ LOC_GLOBAL="$LOC_HOME/.skill-manager/skills/git-integration-repo/scripts/bootstr
 LOC_REPO="$LOC/scripts/bootstrap-home.sh"
 mkdir -p "$LOC/scripts" "$LOC_HOME"
 command cp "$SCRIPT_DIR/agent-home.sh" "$LOC/scripts/agent-home.sh"
+# A REAL checkout, and every invocation below is made from inside it. `--root`
+# defaults to the CALLER'S git toplevel (see the next section), so a locator run
+# from wherever this suite happens to be standing would resolve the target — and
+# therefore candidate rungs 2 and 3 — against THIS repository, and the decoys
+# planted here would be competing with git-integration-repo's own real
+# scripts/bootstrap-home.sh. That is a fixture leak, not a finding.
+git -C "$LOC" init -q -b main
+git -C "$LOC" config user.email selftest@example.invalid
+git -C "$LOC" config user.name "selftest"
+printf 'fixture\n' > "$LOC/README.md"
+git -C "$LOC" add -A
+git -C "$LOC" -c commit.gpgsign=false commit -qm "fixture"
 
 # A decoy bootstrap-home.sh. `$2` decides whether its `--help` names the
 # capability the locator probes for; `$3` is the marker it prints when it is
@@ -1416,7 +1428,7 @@ check "$(yesno absent_substring '--allow-unprojected' "$(bash "$LOC_GLOBAL" --he
   "the stale decoy's --help names --allow-unprojected, so 'it was refused' would prove nothing"
 
 LOC_STALE_RC=0
-locbare bash "$LOC/scripts/agent-home.sh" > "$SCRATCH/loc-stale.out" 2> "$SCRATCH/loc-stale.err" \
+( cd "$LOC" && locbare bash "$LOC/scripts/agent-home.sh" ) > "$SCRATCH/loc-stale.out" 2> "$SCRATCH/loc-stale.err" \
   || LOC_STALE_RC=$?
 check "$(yesno test "$LOC_STALE_RC" != 0)" \
   "a_locator_that_can_only_find_a_stale_bootstrap_refuses" \
@@ -1442,7 +1454,7 @@ check "$(yesno command grep -q 'skill-manager sync' "$SCRATCH/loc-stale.err")" \
 # copy that answers is the GLOBAL home's.
 make_decoy "$LOC_GLOBAL" capable global-fresh
 LOC_G_RC=0
-locbare bash "$LOC/scripts/agent-home.sh" > "$SCRATCH/loc-global.out" 2> "$SCRATCH/loc-global.err" \
+( cd "$LOC" && locbare bash "$LOC/scripts/agent-home.sh" ) > "$SCRATCH/loc-global.out" 2> "$SCRATCH/loc-global.err" \
   || LOC_G_RC=$?
 check "$(yesno command grep -q 'RAN:global-fresh' "$SCRATCH/loc-global.out")" \
   "a_capable_installed_copy_is_used_when_the_checkout_ships_none" \
@@ -1461,7 +1473,7 @@ $(command sed 's/^/        /' "$SCRATCH/loc-global.err")"
 # run, and only the marker says which file produced it.
 make_decoy "$LOC_REPO" capable repo-fresh
 LOC_R_RC=0
-locbare bash "$LOC/scripts/agent-home.sh" > "$SCRATCH/loc-repo.out" 2> "$SCRATCH/loc-repo.err" \
+( cd "$LOC" && locbare bash "$LOC/scripts/agent-home.sh" ) > "$SCRATCH/loc-repo.out" 2> "$SCRATCH/loc-repo.err" \
   || LOC_R_RC=$?
 check "$(yesno command grep -q 'RAN:repo-fresh' "$SCRATCH/loc-repo.out")" \
   "the_checkouts_own_copy_wins_over_an_equally_capable_installed_one" \
@@ -1472,6 +1484,138 @@ check "$(yesno contains "$LOC_REPO" "$(cat "$SCRATCH/loc-repo.err")")" \
   "the_announcement_names_the_copy_that_actually_ran" \
   "stderr does not name $LOC_REPO, so the announcement cannot be used to tell the copies apart:
 $(command sed 's/^/        /' "$SCRATCH/loc-repo.err")"
+
+# ------------------- agent-home.sh bootstraps the CALLER'S checkout, not its own
+#
+# The locator section above proves WHICH COPY runs. This one proves WHICH
+# CHECKOUT it is run against, and the two were answered by the same variable.
+#
+# `--root` defaulted to the SCRIPT's enclosing git toplevel. That is the right
+# answer in exactly one arrangement — a copy sitting in the target repo's own
+# `scripts/` — which is the arrangement every existing check here uses, and the
+# arrangement a real agent never has: the copy an agent reaches is the INSTALLED
+# one, under `<home>/skills/git-integration-repo/scripts/`. Measured from a plain
+# repo, from an integration repo and from a constituent, all three identical:
+#
+#   ✗ source and destination homes must not nest: <home> vs <home>/skills/git-integration-repo/.skill-manager
+#   exit 1
+#
+# The nesting refusal is CORRECT — it is what stopped a 916 MB write into the
+# operator's global home — so an exit code proves nothing here: the defect and
+# the fix both end in a refusal when the target is wrong, and both end in exit 0
+# when it is right. WHICH ROOT WAS CHOSEN is the fact, so the bootstrap is a
+# decoy that reports the `--root` it was handed, and every assertion is about
+# that string, in both directions: the caller's checkout must appear AND the
+# script's own enclosing directory must not.
+
+step "agent-home.sh gives the home to the checkout the CALLER is standing in"
+
+AHR="$SCRATCH/agent-home-root"
+AH_SKILL="$AHR/installed-skill"          # where agent-home.sh is resolved FROM
+AH_HOME="$AHR/home"                      # a HOME with no git-integration-repo in it
+mkdir -p "$AH_SKILL/scripts" "$AH_HOME"
+command cp "$SCRIPT_DIR/agent-home.sh" "$AH_SKILL/scripts/agent-home.sh"
+
+# A bootstrap that does nothing but say which checkout it was pointed at. It
+# answers `--help` with the probed capability so the locator accepts it, and it
+# writes nothing at all — the subject here is the ARGUMENT, and a decoy that also
+# created a home would make "nothing was written" ambiguous.
+AH_DECOY="$AH_SKILL/scripts/bootstrap-home.sh"
+cat > "$AH_DECOY" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf 'usage: bootstrap-home.sh [--root DIR]\n'
+  printf '  --allow-unprojected  accept an unprojected home\n'
+  exit 0
+fi
+root=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--root" ] && { root="$a"; break; }
+  prev="$a"
+done
+printf 'ROOT:%s\n' "$root"
+EOF
+chmod +x "$AH_DECOY"
+
+ahbare() { env -u SKILL_MANAGER_HOME HOME="$AH_HOME" SKILL_MANAGER_CLI="$CLI" "$@"; }
+
+# The three shapes the defect was measured in. Each is its own git toplevel, and
+# none of them is the directory agent-home.sh lives in — which is the whole
+# fixture.
+AH_PLAIN="$AHR/plain"
+AH_INTEG="$AHR/integ"
+AH_CONST="$AH_INTEG/constituents/leaf"
+for d in "$AH_PLAIN" "$AH_INTEG" "$AH_CONST"; do
+  mkdir -p "$d"
+  git -C "$d" init -q -b main
+  git -C "$d" config user.email selftest@example.invalid
+  git -C "$d" config user.name "selftest"
+  printf 'x\n' > "$d/README.md"
+  git -C "$d" add -A
+  git -C "$d" -c commit.gpgsign=false commit -qm "fixture"
+done
+printf '[integration]\nname = "ah-integ"\n' > "$AH_INTEG/integration.toml"
+
+# Non-vacuity, three ways, before a single assertion is made with this fixture.
+
+# 1. The decoy really does report the root it is handed. Without this, every
+#    `ROOT:<x>` check below could be measuring a decoy that prints a constant.
+AH_PROBE="$(bash "$AH_DECOY" --root "$AH_PLAIN" 2>&1 || true)"
+check "$(yesno contains "ROOT:$AH_PLAIN" "$AH_PROBE")" \
+  "the_root_reporting_decoy_reports_the_root_it_is_handed" \
+  "handed --root $AH_PLAIN the decoy said '$AH_PROBE', so 'it reported the caller's checkout' would prove nothing"
+
+# 2. The decoy is not merely echoing its argument list — handed a DIFFERENT root
+#    it must say something different, or `absent ROOT:$AH_SKILL` is true of any
+#    decoy at all.
+AH_PROBE2="$(bash "$AH_DECOY" --root "$AH_SKILL" 2>&1 || true)"
+check "$(yesno contains "ROOT:$AH_SKILL" "$AH_PROBE2")" \
+  "the_decoy_can_also_report_the_root_the_defect_would_have_chosen" \
+  "the decoy cannot express the defect's answer, so the negative half of each check below is vacuous"
+
+# 3. The script's own enclosing directory differs from every target. If they
+#    coincided — which is exactly the arrangement that hid this for so long —
+#    both halves of every check would be true no matter which root was picked.
+AH_SAME=""
+for d in "$AH_PLAIN" "$AH_INTEG" "$AH_CONST"; do
+  [ "$d" = "$AH_SKILL" ] && AH_SAME="$AH_SAME $d"
+done
+check "$(yesno test -z "$AH_SAME")" \
+  "the_script_is_resolved_from_somewhere_that_is_not_any_of_the_targets" \
+  "agent-home.sh lives at $AH_SKILL, which is also a target:$AH_SAME — the defect is invisible from there"
+
+# And now the measurement, per shape. `plain` is an ordinary repo, `integ` holds
+# integration.toml, and `leaf` is a git repo INSIDE integ — the constituent case,
+# which is the one place the two answers used to coincide for the operators who
+# tested this, and therefore the one that has to be named separately.
+ah_case() { # $1 = label, $2 = checkout to stand in
+  local label="$1" dir="$2" log="$SCRATCH/ah-$1.log" rc=0
+  ( cd "$dir" && ahbare bash "$AH_SKILL/scripts/agent-home.sh" ) > "$log" 2>&1 || rc=$?
+  check "$(yesno command grep -qxF "ROOT:$dir" "$log")" \
+    "from_a_${label}_checkout_the_home_is_bootstrapped_for_that_checkout" \
+    "standing in $dir, the bootstrap was pointed at '$(command grep -m1 '^ROOT:' "$log" || printf '<no ROOT: line>')' (rc=$rc)"
+  # Fixed-string, whole-line: the scratch path can carry `.` and a BRE would
+  # match more than it is asked to, which for a NEGATIVE check means failing on
+  # a run that was correct.
+  check "$(yesno test "$(yesno command grep -qxF "ROOT:$AH_SKILL" "$log")" = 0)" \
+    "from_a_${label}_checkout_the_scripts_own_directory_is_not_the_target" \
+    "the bootstrap was pointed at $AH_SKILL — the installed skill directory, which nests inside
+      the home it would clone from. This is the defect, and it exits non-zero either way, so only
+      the root can tell the two apart."
+}
+ah_case plain       "$AH_PLAIN"
+ah_case integration "$AH_INTEG"
+ah_case constituent "$AH_CONST"
+
+# An explicit --root still wins over the cwd, from a cwd that would answer
+# differently — otherwise "it reads the cwd" would have replaced one hardcoded
+# answer with another.
+AH_EXPLICIT="$SCRATCH/ah-explicit.log"
+( cd "$AH_INTEG" && ahbare bash "$AH_SKILL/scripts/agent-home.sh" --root "$AH_PLAIN" ) \
+  > "$AH_EXPLICIT" 2>&1 || true
+check "$(yesno command grep -qxF "ROOT:$AH_PLAIN" "$AH_EXPLICIT")" \
+  "an_explicit_root_still_wins_over_the_callers_checkout" \
+  "--root $AH_PLAIN given from inside $AH_INTEG resolved to '$(command grep -m1 '^ROOT:' "$AH_EXPLICIT" || printf '<none>')'"
 
 # --------------------- no entry point here runs on --help, or takes a flag as a name
 #
