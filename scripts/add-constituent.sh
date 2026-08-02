@@ -6,8 +6,24 @@
 # run after you commit. This ordering is the load-bearing invariant.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
+usage() {
+  cat >&2 <<'EOF'
+usage: add-constituent.sh <name> <remote-url> [default-branch]
+
+  name            Directory name under constituents/.
+  remote-url      Clone source, kept as the constituent's origin.
+  default-branch  Branch to clone. Default: the remote's HEAD.
+  -h, --help      This message, answered BEFORE the clone.
+
+Clones the constituent, STRIPS its .git so the parent tracks plain files, and
+registers it in integration.toml. Does not commit; run finalize-constituents.sh
+after you do.
+EOF
+}
+help_guard "$@"
+
 NAME="${1:-}"; REMOTE="${2:-}"; BRANCH="${3:-}"
-[ -n "$NAME" ] && [ -n "$REMOTE" ] || die "usage: add-constituent.sh <name> <remote-url> [default-branch]"
+[ -n "$NAME" ] && [ -n "$REMOTE" ] || { usage; die "a name and a remote url are required"; }
 
 ROOT="$(repo_root)"; cd "$ROOT"
 REL="constituents/$NAME"

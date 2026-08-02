@@ -10,7 +10,26 @@
 # and --mr to open MRs/issue. This keeps an accidental run from touching remotes.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
-TICKET="${1:-}"; [ -n "$TICKET" ] || die "usage: propagate.sh <TICKET> [--push] [--mr]"
+usage() {
+  cat >&2 <<'EOF'
+usage: propagate.sh <TICKET> [--push] [--mr]
+
+  TICKET      Ticket id. Each changed constituent gets a feature/<TICKET>
+              branch carrying its slice of the merged integration change.
+  --push      Push those branches. Without it this is a DRY RUN: branch and
+              commit locally, touch no remote.
+  --mr        Implies --push, and opens an MR/PR per constituent plus one
+              tracking issue.
+  -h, --help  This message, answered BEFORE any branch is created — this script
+              used to take `--help` as the TICKET and fan out under that name
+              (git-integration-skill#7).
+
+Run from the integration MAIN tree, after the ticketed change has merged back.
+EOF
+}
+help_guard "$@"
+
+TICKET="${1:-}"; [ -n "$TICKET" ] || { usage; die "a ticket id is required"; }
 shift || true
 DO_PUSH=0; DO_MR=0
 for a in "$@"; do case "$a" in --push) DO_PUSH=1;; --mr) DO_PUSH=1; DO_MR=1;; *) die "unknown flag $a";; esac; done

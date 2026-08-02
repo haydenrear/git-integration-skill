@@ -7,6 +7,22 @@
 # review and commit those to the parent to record the new baseline.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
 
+usage() {
+  cat >&2 <<'EOF'
+usage: refresh.sh [name]
+
+  name        Refresh only this constituent. With no name, every one of them.
+  -h, --help  This message, answered BEFORE any fetch or reset — this script
+              used to take `--help` as a constituent NAME
+              (git-integration-skill#7). The step it guards here is
+              `git reset --hard`.
+
+DESTRUCTIVE: each constituent is reset --hard to origin/<branch>, discarding
+un-pushed local content. Propagate and push first.
+EOF
+}
+help_guard "$@"
+
 ONLY="${1:-}"
 ROOT="$(repo_root)"; cd "$ROOT"
 

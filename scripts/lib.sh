@@ -61,6 +61,51 @@ die_fix() {
   exit "$code"
 }
 
+# ------------------------------------------------------------- the help guard
+#
+# git-integration-skill#7, and it was NOT one script's bug. `propagate.sh --help`
+# consumed `--help` as the TICKET and ran the fan-out; `init-integration.sh
+# --help` consumed it as the repo NAME and scaffolded an integration repo called
+# `--help` into whatever directory the caller happened to be standing in —
+# measured during an eval against the operator's own repository. It was
+# idempotent and did no damage that time, which is the only reason it was not
+# worse: the same shape in `refresh.sh` reaches `git reset --hard`.
+#
+# The defect is not "a missing flag". It is that these scripts took ARGV[1] as a
+# name without ever asking whether it looked like one, so every option a caller
+# guesses at — `--help`, `-h`, `--dry-run`, a typo'd `--pushh` — became a ticket
+# id or a repo name and the script ran. new-change.sh and close-change.sh already
+# got this right with a `-*)` arm in their option loops; the scripts that take a
+# bare positional and no options had no loop to put one in.
+#
+# So it is one function, called first, by every script here:
+#
+#   * -h / --help ANYWHERE in the arguments prints usage and exits 0, BEFORE the
+#     script has read a manifest, resolved a root, or written a file. Anywhere,
+#     not just first, because `propagate.sh T-1 --help` is the shape an operator
+#     types when the first spelling did not tell them enough.
+#   * a FIRST POSITIONAL beginning with `-` is refused. A ticket id or a repo
+#     name that starts with a dash is never legitimate, and accepting one is
+#     exactly how `--help` became a repo name. Refused, not silently ignored:
+#     the caller meant an option this script does not have, and running anyway
+#     is what makes the mistake expensive.
+#
+# The caller must define `usage`. That is deliberate — a shared guard that
+# printed a generic message would answer `--help` with something other than the
+# script's own help, which is the thing the caller asked for.
+help_guard() {
+  local a
+  for a in "$@"; do
+    case "$a" in -h|--help) usage; exit 0 ;; esac
+  done
+  case "${1:-}" in
+    -*) usage
+        die "unknown option: $1
+  The first argument is a name, not a flag, and a name never begins with '-'.
+  Nothing was read or written." ;;
+  esac
+}
+
 # Two questions that look like one. Conflating them is how new-change.sh came
 # to build a worktree of the wrong repository, silently and with exit 0:
 #

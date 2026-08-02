@@ -1473,6 +1473,126 @@ check "$(yesno contains "$LOC_REPO" "$(cat "$SCRATCH/loc-repo.err")")" \
   "stderr does not name $LOC_REPO, so the announcement cannot be used to tell the copies apart:
 $(command sed 's/^/        /' "$SCRATCH/loc-repo.err")"
 
+# --------------------- no entry point here runs on --help, or takes a flag as a name
+#
+# git-integration-skill#7, filed against propagate.sh and found again in
+# init-integration.sh during a budget eval: `--help` was consumed as the repo
+# NAME and the script executed against the caller's cwd — which that time was the
+# operator's own repository. It was idempotent and did no damage; `refresh.sh`,
+# with the same shape, reaches `git reset --hard`.
+#
+# An exit-code check cannot see this. `init-integration.sh --help` exited 0 under
+# the defect, because scaffolding an integration repo called `--help` SUCCEEDED.
+# So the property asserted here is that NOTHING WAS EXECUTED: a listing of the
+# directory taken before the run must equal the listing taken after it. And
+# because "the listing did not change" is also true of a script that cannot run
+# at all, the same script is run in the same fixture with a REAL argument first,
+# and that listing must change.
+
+step "No entry point runs on --help, and none takes a flag as a name"
+
+HELPP="$SCRATCH/helpguard"
+mkdir -p "$HELPP/control" "$HELPP/subject" "$HELPP/sweep"
+for d in "$HELPP/control" "$HELPP/subject" "$HELPP/sweep"; do
+  git -C "$d" init -q -b main
+  git -C "$d" config user.email selftest@example.invalid
+  git -C "$d" config user.name "selftest"
+  printf 'x\n' > "$d/README.md"
+  git -C "$d" add -A
+  git -C "$d" -c commit.gpgsign=false commit -qm "fixture"
+done
+
+# THE CONTROL, and it is the mutation proof: the same script, the same kind of
+# directory, one real argument. init-integration.sh is the one the eval measured,
+# and what it does is exactly what `--help` must not do.
+HELP_CTL_BEFORE="$SCRATCH/help-ctl-before.txt"
+listing "$HELPP/control" > "$HELP_CTL_BEFORE"
+( cd "$HELPP/control" && bare bash "$SCRIPT_DIR/init-integration.sh" helpguard-control ) \
+  > "$SCRATCH/help-control.log" 2>&1 || true
+listing "$HELPP/control" > "$SCRATCH/help-ctl-after.txt"
+check "$(yesno differs_file "$HELP_CTL_BEFORE" "$SCRATCH/help-ctl-after.txt")" \
+  "the_scaffolder_really_does_write_into_the_directory_it_is_run_from" \
+  "init-integration.sh with a real name changed nothing, so 'it changed nothing on --help' proves nothing"
+check "$(yesno command grep -q 'helpguard-control' "$HELPP/control/integration.toml")" \
+  "the_control_run_wrote_the_name_it_was_given" \
+  "no integration.toml naming helpguard-control; the control did not do the thing --help must not do"
+
+# THE SUBJECT. Same script, same shape of directory, `--help` instead of a name.
+HELP_SUBJ_BEFORE="$SCRATCH/help-subj-before.txt"
+listing "$HELPP/subject" > "$HELP_SUBJ_BEFORE"
+HELP_RC=0
+( cd "$HELPP/subject" && bare bash "$SCRIPT_DIR/init-integration.sh" --help ) \
+  > "$SCRATCH/help-subject.log" 2>&1 || HELP_RC=$?
+listing "$HELPP/subject" > "$SCRATCH/help-subj-after.txt"
+check "$(yesno same_file "$HELP_SUBJ_BEFORE" "$SCRATCH/help-subj-after.txt")" \
+  "help_does_not_scaffold_an_integration_repo_called_help" \
+  "--help executed against the caller's cwd:
+$(command diff "$HELP_SUBJ_BEFORE" "$SCRATCH/help-subj-after.txt" | command sed 's/^/        /')"
+check "$(yesno test "$HELP_RC" = 0)" \
+  "help_is_answered_rather_than_refused" \
+  "init-integration.sh --help exited $HELP_RC; see $SCRATCH/help-subject.log"
+check "$(yesno command grep -q '^usage: init-integration.sh' "$SCRATCH/help-subject.log")" \
+  "help_prints_that_scripts_own_usage" \
+  "the run exited 0 and printed no usage — which is also what the defect did, having
+      scaffolded a repo called --help instead"
+
+# A FIRST POSITIONAL BEGINNING WITH `-` IS REFUSED, not taken as a name. `--help`
+# is only the spelling that got noticed; the class is every option a caller
+# guesses at, and a mistyped one must not become a repo name either.
+HELP_TYPO_RC=0
+( cd "$HELPP/subject" && bare bash "$SCRIPT_DIR/init-integration.sh" --pushh ) \
+  > "$SCRATCH/help-typo.log" 2>&1 || HELP_TYPO_RC=$?
+listing "$HELPP/subject" > "$SCRATCH/help-typo-after.txt"
+check "$(yesno test "$HELP_TYPO_RC" != 0)" \
+  "an_unknown_leading_dash_argument_is_refused_rather_than_used_as_a_name" \
+  "init-integration.sh --pushh exited 0; see $SCRATCH/help-typo.log"
+check "$(yesno same_file "$HELP_SUBJ_BEFORE" "$SCRATCH/help-typo-after.txt")" \
+  "a_refused_flag_leaves_the_callers_directory_untouched" \
+  "$(command diff "$HELP_SUBJ_BEFORE" "$SCRATCH/help-typo-after.txt" | command sed 's/^/        /')"
+
+# THE SWEEP. The property is not "init-integration.sh was fixed" — it is that
+# every operator entry point this skill ships answers --help without acting.
+# Enumerated from the directory rather than listed, so a script added later is
+# covered by construction. `_manifest.py` is deliberately not in it: it is a
+# private helper (the leading underscore says so), it is never invoked by an
+# operator, and its first positional is a repo ROOT rather than a name.
+HELP_SWEPT=0
+HELP_ACTED=""
+HELP_NOUSAGE=""
+HELP_SWEEP_BEFORE="$SCRATCH/help-sweep-before.txt"
+listing "$HELPP/sweep" > "$HELP_SWEEP_BEFORE"
+for f in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/wt"; do
+  [ -f "$f" ] || continue
+  n="$(basename "$f")"
+  # lib.sh is SOURCED, never run: it defines helpers and has no main, so it has
+  # no --help to answer and nothing to guard. Every other file here is something
+  # an operator or an agent is told to invoke.
+  case "$n" in lib.sh) continue ;; esac
+  HELP_SWEPT=$((HELP_SWEPT + 1))
+  hrc=0
+  ( cd "$HELPP/sweep" && bare bash "$f" --help ) > "$SCRATCH/help-sweep-$n.log" 2>&1 || hrc=$?
+  listing "$HELPP/sweep" > "$SCRATCH/help-sweep-after.txt"
+  same_file "$HELP_SWEEP_BEFORE" "$SCRATCH/help-sweep-after.txt" \
+    || { HELP_ACTED="$HELP_ACTED $n"; command cp "$SCRATCH/help-sweep-after.txt" "$HELP_SWEEP_BEFORE"; }
+  if [ "$hrc" != 0 ] || ! command grep -q '^usage:' "$SCRATCH/help-sweep-$n.log"; then
+    HELP_NOUSAGE="$HELP_NOUSAGE $n(rc=$hrc)"
+  fi
+done
+
+# Vacuity guard for the sweep itself, in this file's usual shape: a loop that
+# matched no files would report both properties clean forever. The floor is just
+# under the current count so it fails if the enumeration silently narrows.
+check "$(yesno test "$HELP_SWEPT" -ge 9)" \
+  "the_help_sweep_actually_found_the_entry_points_to_check" \
+  "the sweep ran $HELP_SWEPT script(s); it is not looking at the right directory"
+
+check "$(yesno test -z "$HELP_ACTED")" \
+  "no_entry_point_writes_anything_when_asked_for_help" \
+  "these changed the caller's directory on --help:$HELP_ACTED"
+check "$(yesno test -z "$HELP_NOUSAGE")" \
+  "every_entry_point_answers_help_with_its_own_usage_and_exit_0" \
+  "these did not:$HELP_NOUSAGE"
+
 # --------------------- no refusal here claims a fact it did not measure
 #
 # `--onboard`'s failure path said "The home is wired but empty; nothing was
