@@ -92,23 +92,6 @@ same_file()    { command diff -q "$1" "$2" >/dev/null 2>&1; }
 differs_file() { ! same_file "$1" "$2"; }
 executable() { [ -n "${1:-}" ] && [ -f "$1" ] && [ -x "$1" ]; }
 yesno()     { if "$@"; then printf 1; else printf 0; fi; }
-
-# The ignore rules references/skill-homes.md prescribes, written into a fixture
-# repo before anything bootstraps a home in it.
-#
-# This is a PRECONDITION of the fixtures now, not a tidiness measure, and it is
-# the cost of making the tracked `.gitignore` the mechanism: bootstrap-home.sh
-# REFUSES (exit 7) a checkout whose `.gitignore` does not cover what a home
-# leaves at its root, and it writes no rule anywhere to repair that. A fixture
-# that skipped this would be a repo nobody had onboarded, the bootstrap would
-# refuse, and every check after it would be about a run that never happened.
-# Stated once, here, so the precondition is visible rather than copied.
-#
-# Deliberately NOT used by the cleanproj fixture: that one carries exactly the
-# four documented rules, because the refusal is what it is about.
-ignore_home_artifacts() {
-  printf '/.skill-manager/\n/.claude/\n/.claude.json\n/.codex/\n/.gemini/\n' > "$1/.gitignore"
-}
 ok()   { PASSED=$((PASSED + 1)); printf '  PASS  %s\n' "$1" >&2; }
 bad()  { FAILED=$((FAILED + 1)); printf '  FAIL  %s\n      %s\n' "$1" "$2" >&2; }
 check() { if [ "$1" = 1 ]; then ok "$2"; else bad "$2" "$3"; fi; }
@@ -192,7 +175,6 @@ mkdir -p "$PROJ"
 git -C "$PROJ" init -q -b main
 git -C "$PROJ" config user.email selftest@example.invalid
 git -C "$PROJ" config user.name "selftest"
-ignore_home_artifacts "$PROJ"
 printf 'fixture\n' > "$PROJ/README.md"
 git -C "$PROJ" add -A
 git -C "$PROJ" -c commit.gpgsign=false commit -qm "fixture"
@@ -508,7 +490,6 @@ mkdir -p "$EMPTYP"
 git -C "$EMPTYP" init -q -b main
 git -C "$EMPTYP" config user.email selftest@example.invalid
 git -C "$EMPTYP" config user.name "selftest"
-ignore_home_artifacts "$EMPTYP"
 printf 'x\n' > "$EMPTYP/README.md"
 git -C "$EMPTYP" add -A
 git -C "$EMPTYP" -c commit.gpgsign=false commit -qm "fixture"
@@ -981,7 +962,6 @@ mkdir -p "$step_scratch"
 git -C "$step_scratch" init -q -b main
 git -C "$step_scratch" config user.email selftest@example.invalid
 git -C "$step_scratch" config user.name "selftest"
-ignore_home_artifacts "$step_scratch"
 printf 'fixture\n' > "$step_scratch/README.md"
 git -C "$step_scratch" add -A
 git -C "$step_scratch" -c commit.gpgsign=false commit -qm "fixture"
@@ -1129,7 +1109,7 @@ check "$(yesno test -z "$UNKNOWN")" \
   "these are printed as instructions but the CLI rejects them:
 $UNKNOWN"
 
-# ---------------- onboarding leaves the tree clean, AND .gitignore is why
+# ------------- onboarding leaves the tree clean, AND info/exclude is why
 #
 # Measured: after a documented bootstrap + install, `git status --porcelain`
 # read `?? .claude.json`, and the next documented step — `wt new`, which asserts
@@ -1137,28 +1117,32 @@ $UNKNOWN"
 # made it unusable by the next step of onboarding it. `/.claude/` does not match
 # `/.claude.json`, and the documented rule list had four entries.
 #
-# TWO PROPERTIES, and the second is the one that costs something to assert:
+# THREE PROPERTIES, and only the first is what a naive test would check:
 #
 #   1. after the bootstrap, nothing the home machinery put at the root is
 #      reported by git status, whatever it is called — and the operator's own
 #      untracked work IS still reported, because a bootstrap that silenced
 #      `git status` wholesale would satisfy (1) and be far worse.
 #
-#   2. THE TRACKED `.gitignore` IS WHY. `$GIT_COMMON_DIR/info/exclude` leaves a
-#      tree exactly as clean as `.gitignore` does, so a check that asserts only
-#      "clean" passes under either and proves nothing about which mechanism is
-#      running — it reads as "the documented rules are correct" when they may
-#      not be. `git check-ignore -v` names the source file, and that is the only
-#      thing that tells the two apart. Both directions are asserted: the source
-#      IS `.gitignore` (positive), and the bootstrap left `info/exclude`
-#      byte-identical (negative, and the one the earlier mechanism fails).
+#   2. `$GIT_COMMON_DIR/info/exclude` IS WHY. It leaves a tree exactly as clean
+#      as a `.gitignore` rule does, so (1) alone passes under either mechanism
+#      and proves nothing about which one is running. `git check-ignore -v` names
+#      the source file, and it is the only thing that tells them apart. Asserted
+#      as an exact string, so "nothing ignores it" cannot satisfy it either.
 #
-# And the refusal in between, because the tracked file cannot be written by a
-# script that must also leave the tree clean: a repo whose `.gitignore` does not
-# cover a home is REFUSED, with the missing lines named, rather than silently
-# repaired somewhere no review sees.
+#   3. THE TRACKED `.gitignore` WAS NOT TOUCHED. That is the whole reason this
+#      mechanism was chosen over writing the tracked file: onboarding a repo must
+#      never require a commit TO that repo, because read-only checkouts, CI, and
+#      vendored third-party constituents cannot make one. A bootstrap that
+#      modified `.gitignore` would leave a dirty tree in a different way and
+#      `wt new` would refuse it just the same — so `git status` must show no
+#      change to it, and the fixture's four rules must still be four.
+#
+# The fixture carries EXACTLY the four documented rules and no fifth, so the
+# artefact really is uncovered by them and this section is about the mechanism
+# rather than about a `.gitignore` that already happened to be right.
 
-step "A repo whose .gitignore does not cover a home is refused, with the lines named"
+step "A bootstrapped checkout is clean, and info/exclude — not .gitignore — is why"
 
 CLEANP="$SCRATCH/cleanproj"
 mkdir -p "$CLEANP"
@@ -1194,65 +1178,18 @@ check "$(yesno command grep -q '^?? \.claude\.json$' "$SCRATCH/clean-before.txt"
   "the fixture's .claude.json is already ignored, so every check below would pass for the wrong reason:
 $(command sed 's/^/        /' "$SCRATCH/clean-before.txt")"
 
-# The exclude file as it stands BEFORE any bootstrap runs, kept for the
-# byte-comparison further down. That comparison is the negative half of
-# property 2, so it needs a baseline taken before the mechanism could have
-# touched it.
+# The tracked file as it stands before the bootstrap. Property 3 is a
+# comparison, so it needs a baseline taken before the mechanism could have
+# touched anything.
 CLEAN_EXCL="$CLEANP/.git/info/exclude"
-mkdir -p "$CLEANP/.git/info"; : >> "$CLEAN_EXCL"
-command cp "$CLEAN_EXCL" "$SCRATCH/clean-exclude-before.txt"
+command cp "$CLEANP/.gitignore" "$SCRATCH/clean-gitignore-before.txt"
 
 CLEAN_RC=0
 bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$CLEANP" \
   > "$SCRATCH/clean.log" 2>&1 || CLEAN_RC=$?
-check "$(yesno test "$CLEAN_RC" = 7)" \
-  "a_repo_whose_gitignore_does_not_cover_a_home_is_refused" \
-  "bootstrap exited $CLEAN_RC, not 7 — it did not refuse a repo it cannot leave clean. See $SCRATCH/clean.log"
-
-# A refusal is only useful if it says what to add. The exact rule, not prose
-# about rules.
-check "$(yesno command grep -q '^    /\.claude\.json$' "$SCRATCH/clean.log")" \
-  "the_refusal_names_the_exact_gitignore_line_that_clears_it" \
-  "the refusal never printed the rule \`/.claude.json\`. See $SCRATCH/clean.log"
-
-# The negative half of property 2, asked of GIT rather than of the file: after
-# a run that refused, nothing ignores `.claude.json`. The refusal is allowed to
-# be inconvenient; it is not allowed to buy its way out by inventing a
-# per-clone rule that hides the problem from this checkout and from no other.
-# Non-vacuous by construction — the same path was asserted UNTRACKED above, so
-# "nothing ignores it" is a fact this run could have changed and did not.
-CLEAN_SRC0="$(git -C "$CLEANP" check-ignore -v --no-index -- .claude.json 2>/dev/null | command head -1 || true)"
-check "$(yesno test -z "$CLEAN_SRC0")" \
-  "the_refusing_run_did_not_make_something_else_the_source_of_the_rule" \
-  "after the refusal, git says .claude.json is ignored by: ${CLEAN_SRC0:-nothing}
-        — a per-clone rule makes THIS checkout clean and leaves the repository just as broken"
-
-# And the same thing said in bytes, because the file is the thing a future
-# reader will look at. This is the assertion that fails the moment anyone makes
-# `info/exclude` the mechanism again; it is checked on the refusing run and
-# again on the succeeding one below, because a repair could be attempted on
-# either.
-check "$(yesno same_file "$CLEAN_EXCL" "$SCRATCH/clean-exclude-before.txt")" \
-  "the_refusing_run_wrote_no_ignore_rule_into_git_info_exclude" \
-  "bootstrap-home.sh wrote into $CLEAN_EXCL instead of refusing:
-$(command diff "$SCRATCH/clean-exclude-before.txt" "$CLEAN_EXCL" | command sed 's/^/        /')"
-
-step "With the rule committed to .gitignore, the tree is clean and .gitignore is why"
-
-# The documented remedy, run exactly as the refusal prints it: add the line to
-# the TRACKED file and commit it. The commit is part of the remedy — an
-# uncommitted .gitignore is a dirty tree in its own right, which is precisely
-# why a script cannot do this half.
-printf '/.claude.json\n' >> "$CLEANP/.gitignore"
-git -C "$CLEANP" add .gitignore
-git -C "$CLEANP" -c commit.gpgsign=false commit -qm "ignore the per-checkout home"
-
-CLEAN2_RC=0
-bare bash "$SCRIPT_DIR/bootstrap-home.sh" --root "$CLEANP" \
-  > "$SCRATCH/clean2.log" 2>&1 || CLEAN2_RC=$?
-check "$(yesno test "$CLEAN2_RC" = 0)" \
-  "the_documented_remedy_actually_clears_the_refusal" \
-  "bootstrap exited $CLEAN2_RC after the documented .gitignore fix. See $SCRATCH/clean2.log"
+check "$(yesno test "$CLEAN_RC" = 0)" \
+  "the_clean_tree_fixture_bootstrapped" \
+  "bootstrap exited $CLEAN_RC; the cleanliness checks would be about a run that did nothing. See $SCRATCH/clean.log"
 
 git -C "$CLEANP" status --porcelain > "$SCRATCH/clean-after.txt"
 check "$(yesno absent_pattern '\.claude\.json' "$SCRATCH/clean-after.txt")" \
@@ -1260,21 +1197,42 @@ check "$(yesno absent_pattern '\.claude\.json' "$SCRATCH/clean-after.txt")" \
   "still reported by git status after the bootstrap:
 $(command sed 's/^/        /' "$SCRATCH/clean-after.txt")"
 
-# The positive half of property 2. `check-ignore -v` prints
-# `<source>:<line>:<pattern>\t<path>`, and the source has to be the tracked
-# file. Asserted as an exact string rather than a `grep -v exclude`, so an empty
-# result — the path not ignored at all — cannot satisfy it either.
+# PROPERTY 2, and it is the whole reason this section is worth more than a
+# `git status` call. `check-ignore -v` prints `<source>:<line>:<pattern>\t<path>`;
+# the source must be the per-clone exclude file. Asserted as an exact string
+# rather than as "not .gitignore", so an empty result — nothing ignoring the
+# path at all — cannot satisfy it either, and the fixture's own four rules
+# (which do NOT cover this path, asserted above) cannot be mistaken for it.
 CLEAN_SRC="$(git -C "$CLEANP" check-ignore -v --no-index -- .claude.json 2>/dev/null | command head -1 || true)"
 CLEAN_SRC="${CLEAN_SRC%%:*}"
-check "$(yesno test "$CLEAN_SRC" = ".gitignore")" \
-  "the_tracked_gitignore_is_what_makes_the_tree_clean" \
-  "git check-ignore names '${CLEAN_SRC:-nothing}' as the source of the rule that covers .claude.json, not .gitignore —
-        the tree is clean for a reason the repository does not carry, so every other clone of it is still dirty"
+check "$(yesno test "$CLEAN_SRC" = ".git/info/exclude")" \
+  "the_per_clone_exclude_file_is_what_makes_the_tree_clean" \
+  "git check-ignore names '${CLEAN_SRC:-nothing}' as the source of the rule covering .claude.json,
+        not .git/info/exclude — 'the tree is clean' is true under either mechanism, so this is
+        the only assertion that says which one ran"
 
-check "$(yesno same_file "$CLEAN_EXCL" "$SCRATCH/clean-exclude-before.txt")" \
-  "the_succeeding_run_wrote_no_ignore_rule_into_git_info_exclude" \
-  "bootstrap-home.sh wrote into $CLEAN_EXCL:
-$(command diff "$SCRATCH/clean-exclude-before.txt" "$CLEAN_EXCL" | command sed 's/^/        /')"
+# And the rule itself, in the file, by name. The `-x` is deliberate: a rule that
+# merely mentions the path inside the header comment would satisfy a loose grep.
+check "$(yesno command grep -qxF '/.claude.json' "$CLEAN_EXCL")" \
+  "the_exclude_file_carries_the_measured_rule_verbatim" \
+  "$CLEAN_EXCL has no \`/.claude.json\` line:
+$(command sed 's/^/        /' "$CLEAN_EXCL")"
+
+# PROPERTY 3. Writing the tracked file was the other candidate mechanism, and it
+# was rejected because onboarding a repo must not require a commit TO that repo
+# — a read-only checkout, a CI job or a vendored constituent cannot make one.
+# Both halves: the bytes are unchanged, and git agrees the file is unmodified
+# (a bootstrap that rewrote it identically would pass the first and still be
+# doing the wrong thing on some other repo).
+check "$(yesno same_file "$CLEANP/.gitignore" "$SCRATCH/clean-gitignore-before.txt")" \
+  "the_bootstrap_did_not_write_the_tracked_gitignore" \
+  "bootstrap-home.sh modified the tracked .gitignore, which no read-only checkout could commit:
+$(command diff "$SCRATCH/clean-gitignore-before.txt" "$CLEANP/.gitignore" | command sed 's/^/        /')"
+
+check "$(yesno absent_pattern '\.gitignore' "$SCRATCH/clean-after.txt")" \
+  "git_does_not_report_the_gitignore_as_modified_either" \
+  "git status reports .gitignore after the bootstrap, so the tree is dirty the other way:
+$(command sed 's/^/        /' "$SCRATCH/clean-after.txt")"
 
 # The other half of property 1, and it is the one that makes the section worth
 # having: a bootstrap that ignored everything would satisfy every check above.
