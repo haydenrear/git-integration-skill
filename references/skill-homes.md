@@ -19,15 +19,23 @@ So each checkout gets its **own** home:
 One script does this, for both the repo root and every worktree:
 
 ```bash
-<this-skill>/scripts/bootstrap-home.sh --root <checkout>
+"${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts/bootstrap-home.sh" --root <checkout>
 ```
 
-A repo that has been onboarded also carries a locator, `scripts/agent-home.sh`,
-so a person or agent in the checkout does not have to know where the skill
-lives. **This skill ships that file**: copy `<this-skill>/scripts/agent-home.sh`
+**An agent does not need that path memorised, and does not need a copy of
+anything.** `wt new` in a repository with no home yet exits 3 and prints the
+line above with both paths already absolute; running it verbatim is the whole
+onboarding. So no repo is *required* to carry a locator, and copying one in is
+not a prerequisite for anything.
+
+A repo *may* additionally carry `scripts/agent-home.sh`, purely so a human in
+the checkout can type `scripts/agent-home.sh` instead of the long path. **This
+skill ships that file**: copy
+`${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts/agent-home.sh`
 into the target repo's own `scripts/` directory. It holds no policy — it finds
 the `bootstrap-home.sh` above and `exec`s it with `--root <repo>`, so a copy of
-it is never a copy of the ordering rules.
+it is never a copy of the ordering rules. It is a convenience, not a rung the
+mechanism depends on; a consumer that never copies it loses nothing.
 
 **Which copy it found is printed on every run**, because "the bootstrap ran" and
 "the bootstrap you reviewed ran" are different facts. Measured, same fixture,
@@ -563,7 +571,7 @@ Tear a worktree down with `close-change.sh`, never with a bare
 
 ```bash
 # The gate runs BEFORE anything is deleted.
-<this-skill>/scripts/close-change.sh TICKET-123
+"${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts/close-change.sh" TICKET-123
 
 # At epic close, list what is left and close each one deliberately.
 git -C <repo-root> worktree list
@@ -656,7 +664,7 @@ forgot. The gate makes it a mechanism.
 ### The override, and why it exists
 
 ```bash
-<this-skill>/scripts/close-change.sh TICKET-123 --force
+"${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts/close-change.sh" TICKET-123 --force
 ```
 
 `--force` still runs the gate and still prints the blockers; it only declines to
@@ -840,11 +848,17 @@ Two measured consequences worth knowing before you rely on the in-repo copy:
    `git check-ignore -v`.
 3. Write a `skill-project.toml` at the root declaring the units this repo's
    agents need. It is portable intent — the realized state is the home.
-4. Copy this skill's `scripts/agent-home.sh` (the locator) into the repo's own
-   `scripts/` directory: `cp <this-skill>/scripts/agent-home.sh scripts/`.
-5. Run `scripts/agent-home.sh` once for the main tree. (Equivalent, and the
-   spelling to use before the file has been copied:
-   `<this-skill>/scripts/bootstrap-home.sh --root <repo>`.)
+4. Give the main tree its home, once:
+   `${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts/bootstrap-home.sh --root <repo>`.
+   This is the whole step. It is also exactly the `fix:` line `wt new` prints, in
+   full and already absolute, when it meets a repository with no home — so an
+   agent that never read this page arrives at the same command.
+5. *Optional convenience:* copy this skill's `scripts/agent-home.sh` (the
+   locator) into the repo's own `scripts/` so a human can type
+   `scripts/agent-home.sh` instead of the path in step 4:
+   `cp ${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts/agent-home.sh scripts/`.
+   Skip it freely — nothing downstream requires the copy, and an agent should
+   never have to check whether a given repo has one.
 6. From then on, `new-change.sh` gives every worktree its own home. Nothing to
    remember and nothing to **export** — which is a statement about the
    environment, not a promise that the first launch will proceed. Expect the

@@ -7,13 +7,17 @@ ticket and a worktree, but no submodules** — the worktree is just files.
 ## If you are here to create a worktree, you do not need this page
 
 ```bash
-<this-skill>/scripts/wt new   TICKET-123
-<this-skill>/scripts/wt close TICKET-123
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
+
+"$S/wt" new   TICKET-123
+"$S/wt" close TICKET-123
 ```
 
-`wt` **is not on `PATH`** — invoke it by absolute path, which is how every
-command in this repo prints itself, including the `CLOSE` key. Run `new` from
-anywhere inside the repo you want branched. It resolves the repo, creates the
+`wt` **is not on `PATH`** — invoke it by a path that resolves, which is how every
+command in this repo prints itself, including the `CLOSE` key. An installed
+unit's files live at `$SKILL_MANAGER_HOME/skills/<unit>/`; the `:-` fallback
+makes the same line work from a bare shell. Run `new` from anywhere inside the
+repo you want branched. It resolves the repo, creates the
 worktree, gives it its own Skill Manager home, and answers in **one line**:
 
 ```
@@ -44,7 +48,7 @@ Everything else follows from the path *by construction*:
 | where to edit | the path |
 | the launcher | `<worktree>/.skill-manager/bin/launch/claude` |
 | the drift-gate remedy, if `LAUNCH` refuses with **exit 8** | `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack` |
-| the teardown | `<this-skill>/scripts/wt close TICKET-123` — the other half of what you just typed |
+| the teardown | `"$S/wt" close TICKET-123` — the other half of what you just typed |
 | the branch | `feature/TICKET-123`, and `wt close` names it when it differs |
 | where the worktree's HOME work ended up, and what it still owes | the `HOME-WORK` key, and the clause `wt close` puts on its one line |
 | the constituent fan-out (integration repos) | `propagate.sh TICKET-123` |
@@ -70,10 +74,12 @@ never fires.
 same `KEY  value` contract as before, by any of:
 
 ```bash
-<this-skill>/scripts/wt info TICKET-123              # a worktree that exists; creates and removes nothing
-<this-skill>/scripts/wt new TICKET-123 --verbose     # on the run that creates it
-<this-skill>/scripts/wt close TICKET-123 --dry-run   # CLEAN / CLOSE — would this close cleanly?
-<this-skill>/scripts/wt close TICKET-123 --force     # CLOSED / BRANCH / DELETE / HOME-WORK, plus what it discarded
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
+
+"$S/wt" info TICKET-123              # a worktree that exists; creates and removes nothing
+"$S/wt" new TICKET-123 --verbose     # on the run that creates it
+"$S/wt" close TICKET-123 --dry-run   # CLEAN / CLOSE — would this close cleanly?
+"$S/wt" close TICKET-123 --force     # CLOSED / BRANCH / DELETE / HOME-WORK, plus what it discarded
 ```
 
 ### How long it takes, and how to wait for it
@@ -219,7 +225,7 @@ Written out in full, with the prose kept. `wt new TICKET-123` is steps 1 and 1b
 in one command with the narration suppressed, and `wt close TICKET-123` is 4b.
 
 ```bash
-S=<this-skill>/scripts
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
 
 # 1. Start the change. Requires a clean tree in the repo it picks — and it
 #    prints which repo that is, and of what kind, before doing anything.

@@ -7,7 +7,7 @@ ordering below is not cosmetic.
 ## Procedure
 
 ```bash
-S=<this-skill>/scripts
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
 
 # 1. Scaffold the parent (markers, root .gitignore, git init).
 $S/init-integration.sh my-integration /path/to/parent
@@ -53,9 +53,11 @@ git add -A && git commit -m "scaffold compositions + markers"
 #        committing the rules buys is that everyone ELSE who clones this repo
 #        gets a clean tree too: the exclude rule is invisible to them.
 #      - write skill-project.toml declaring the units this repo's agents need
-#      - cp $S/agent-home.sh scripts/   (the locator this skill ships), then
-#        `scripts/agent-home.sh` from the repo root is the same thing as the
-#        line below and needs to know nothing about where the skill lives
+#      - OPTIONAL: cp $S/agent-home.sh scripts/  (the locator this skill ships),
+#        after which `scripts/agent-home.sh` from the repo root does the same
+#        thing as the line below. Convenience for a human only — an agent never
+#        needs it, because `wt new` in a repo with no home prints this exact
+#        line, absolute, as its `fix:`. Do not make it a required step.
 $S/bootstrap-home.sh --root .
 ```
 

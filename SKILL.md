@@ -104,16 +104,27 @@ Creating and closing worktrees is the thing this repo does all day, so it must
 cost an agent two commands and no reading. It does:
 
 ```bash
-<this-skill>/scripts/wt new   TICKET-123     # worktree + its own home, launchable
-<this-skill>/scripts/wt close TICKET-123     # teardown, through the close-out gate
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
+
+"$S/wt" new   TICKET-123     # worktree + its own home, launchable
+"$S/wt" close TICKET-123     # teardown, through the close-out gate
 ```
 
-**`wt` is not on `PATH`.** Every spelling on this page begins with
-`<this-skill>/scripts/` for that reason: the line as printed has to be the line
-that runs, and a bare `wt` is not one. The `CLOSE` key `new-change.sh` prints is
-an absolute path for the same reason — and it is runnable **from any
-directory**, because `close` and `info` resolve a ticket against the worktrees
-that exist rather than against the repo you happen to be standing in.
+**`wt` is not on `PATH`, so every spelling here is a path that resolves.** An
+installed unit's files live at `$SKILL_MANAGER_HOME/skills/<unit>/` — the same
+rung `agent-home.sh` resolves `bootstrap-home.sh` through — and the `:-` fallback
+is what makes the line work from a bare shell, which is how these are run by
+hand. The line as printed has to be the line that runs: a bare `wt` is not one,
+and neither is a `<placeholder>` the reader has to look up. (In a checkout of
+this skill, or of an integration repo tracking it as a constituent,
+`scripts/wt` relative to that root is the same file.)
+
+The `CLOSE` key `new-change.sh` prints is an absolute path for the same reason.
+It is runnable from **any git repository**, not only the one that opened the
+worktree, because `close` and `info` resolve a ticket against the worktrees that
+exist rather than against the repo you are standing in. It does still have to be
+*a* repository: from a directory outside any git repo it exits 1 with
+`not inside a git repository`.
 
 **A successful run costs one line, and the path on it is the answer.**
 
@@ -138,21 +149,28 @@ the phases live at constant cost.
 Everything else follows from that path by construction, so it is not printed:
 the launcher is `<worktree>/.skill-manager/bin/launch/claude`, the drift-gate
 remedy is `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack`,
-and the teardown is `<this-skill>/scripts/wt close TICKET-123`. When you want
-them spelled out — for a worktree that already exists, creating and removing
-nothing:
+and the teardown is `"$S/wt" close TICKET-123`. When you want them spelled out —
+for a worktree that already exists, creating and removing nothing:
 
 ```bash
-<this-skill>/scripts/wt info TICKET-123    # WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE
+"$S/wt" info TICKET-123    # WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE
 ```
 
-A failure is three lines, and the second one runs:
+A failure is three lines, and the second one runs **as printed** — the `fix:`
+value is always an absolute, already-resolved path, never a placeholder:
 
 ```
 error creating worktree: the project home /path/to/repo/.skill-manager holds no skills, ...
-fix: <this-skill>/scripts/bootstrap-home.sh --root /path/to/repo --onboard
+fix: /path/to/home/skills/git-integration-repo/scripts/bootstrap-home.sh --root /path/to/repo --onboard
 log: /tmp/new-change-a1b2c3.log
 ```
+
+The most common one, on the first ticket in a repository that has never been
+given a home, is `no project home yet` at **exit 3**. Its `fix:` line is the
+one-time, per-repository onboarding; run it verbatim and re-run `wt new`. That
+refusal is why no repository needs `agent-home.sh` copied into it as an
+onboarding step, and why no page needs to explain where this skill lives: the
+machinery answers with a path.
 
 The reasoning is never printed — it is in the file the third line names, in
 full. Read it when the `fix:` line is not enough, and not before.
@@ -165,11 +183,27 @@ whole key set — now including `HOME-WORK` — is still printed by `wt info`,
 `references/worktrees.md` explain *why* each line is what it is; the happy path
 does not need them.
 
+### Who this is for, and who documents it
+
+`wt` is **not** an integration-repo-only tool, and nothing on the create path is
+integration-specific: it detects a standalone repo, a constituent and an
+integration repo itself, and only an integration repo gets the extra `PROPAGATE`
+key from `wt info`. So the general worktree lifecycle is owned here as an
+implementation, but the **instruction an ordinary ticket follows is owned by
+`git-issue`** — its `references/worktree-branch.md` is the canonical wording of
+the worktree contract that goes into an issue body, and `git-issue-workflow`
+executes it. Those skills name `scripts/wt` by resolved path and declare this
+unit as a hard `skill_reference`, so the file is present wherever they are.
+
+Keep it that way round when editing: a plain-repo agent should never have to read
+this page to make a worktree, and this page should never restate the issue-body
+wording that `git-issue` owns.
+
 ## Quick reference
 
 ```bash
 # scripts read integration.toml from the repo root; run them from anywhere in the repo
-S=<this-skill>/scripts
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
 
 # --- create ---
 $S/init-integration.sh my-integration            # scaffold markers, .gitignore, git init
