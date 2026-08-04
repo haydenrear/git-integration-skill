@@ -6,7 +6,7 @@
 # the parent index holds real blobs (not gitlinks) and stays clean.
 #
 # Run this only AFTER `git add -A && git commit` of the onboarded files.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/integration-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'

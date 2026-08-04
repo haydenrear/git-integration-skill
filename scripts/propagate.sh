@@ -8,7 +8,7 @@
 #
 # Default is a DRY RUN (branch + commit locally, no network). Add --push to push
 # and --mr to open MRs/issue. This keeps an accidental run from touching remotes.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/integration-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'

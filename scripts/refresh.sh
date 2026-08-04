@@ -5,7 +5,7 @@
 # and push first. With no name, refreshes every constituent; with a name, one.
 # Afterward the parent working tree will show upstream drift as ordinary diffs —
 # review and commit those to the parent to record the new baseline.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/integration-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'

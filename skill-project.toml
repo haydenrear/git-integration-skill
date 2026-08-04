@@ -8,20 +8,26 @@
 #
 # It deliberately does NOT declare `git-integration-repo` itself. A repo is its
 # own source of truth; installing it into its own home would give an agent two
-# copies of the same skill with no rule about which one it is editing. That
-# matters more here than anywhere else in the fan-out, because
-# scripts/bootstrap-home.sh is the script that CREATES homes: an agent editing
-# it must be editing the tracked copy, not a copy installed under
-# .skill-manager/skills/git-integration-repo that the next `sync` overwrites.
+# copies of the same skill with no rule about which one it is editing.
+#
+# It DOES declare `git-issue-workflow`, and that is not optional here: every
+# script this unit still ships sources `die`/`info`/`step`/`help_guard` and the
+# checkout predicates from that unit's lib.sh, through
+# scripts/integration-lib.sh. Without it in this checkout's home, nothing here
+# runs — and neither does `wt`, which is how a ticket in this repo gets its
+# worktree.
 #
 # How the home is produced — read this before running `project resolve`
 # ---------------------------------------------------------------------
 # `project resolve` writes into whatever `SKILL_MANAGER_HOME` names. Run it
 # before this checkout has its own home and it mutates the operator's global
 # ~/.skill-manager. Create the local home first, point `SKILL_MANAGER_HOME` at
-# it, and only then resolve. This repo's own script is the one that does it:
+# it, and only then resolve. The script that does it belongs to
+# git-issue-workflow (a home is a fact about a checkout, not about constituents),
+# and an installed unit's files live at $SKILL_MANAGER_HOME/skills/<unit>/:
 #
-#   SKILL_MANAGER_CLI=<epic skill-manager> bash scripts/bootstrap-home.sh --root "$PWD"
+#   W="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts"
+#   SKILL_MANAGER_CLI=<epic skill-manager> bash "$W/bootstrap-home.sh" --root "$PWD"
 #   export SKILL_MANAGER_HOME="$PWD/.skill-manager"
 #   skill-manager project resolve --project-dir "$PWD" --skip-gateway
 #
@@ -75,15 +81,27 @@ source = "github:haydenrear/skill-publisher-skill"
 #     imported unit is declared. Unit `skill_references` are followed
 #     automatically; markdown `skill-imports` are not.
 #
-#     It is the SUBSTANTIVE dependency of this repo. scripts/bootstrap-home.sh
-#     and scripts/close-change.sh are written against `home clone`, `home
+#     It remains a substantive dependency of this repo: `home clone`, `home
 #     policy`, `home shims`, `home describe`, `home drift`, `home close-out` and
-#     `exec --print-env`; references/skill-homes.md documents the three-tier
-#     model and the live/frozen policy. Nothing here can be changed correctly
-#     without that surface's contract ---
+#     `exec --print-env` are the surface every per-checkout home is built on, and
+#     git-issue-workflow's references/skill-homes.md documents the three-tier
+#     model and the live/frozen policy against it ---
 
 [skills.skill-manager]
 source = "github:haydenrear/skill-manager-skill"
+
+# --- THE HARD RUNTIME DEPENDENCY OF THIS UNIT. `wt`, new-change.sh,
+#     close-change.sh, bootstrap-home.sh, agent-home.sh and the shared lib.sh
+#     live here, and every script this repo still ships sources that lib.sh
+#     across the dependency (scripts/integration-lib.sh is the one resolver).
+#     Declared as a project dependency as well as a skill_reference because
+#     `skill_references` governs the INSTALL graph while this file governs what
+#     an agent working IN THIS CHECKOUT gets — including inside every ticket
+#     worktree, whose home is a clone of this one. If it is not here, the
+#     resolver refuses at source time and no script in this repo runs ---
+
+[skills.git-issue-workflow]
+source = "github:haydenrear/git-issue-workflow-skill"
 
 # --- REPO-SPECIFIC DECISION: spec-double-compiler, test-graph and deploy-helm
 #     are deliberately NOT declared, though this unit's SKILL.md `skill-imports`
