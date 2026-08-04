@@ -4,7 +4,7 @@
 # become plain files the parent will track), and register it in integration.toml.
 # Does NOT commit and does NOT restore .git — that is finalize-constituents.sh,
 # run after you commit. This ordering is the load-bearing invariant.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/integration-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'

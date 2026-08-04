@@ -1,11 +1,40 @@
 # git-integration-repo — skill-manager unit manifest.
 #
-# No hard skill_references: the composed skills (spec-double-compiler,
-# test-graph, deploy-helm) are semantic imports declared in SKILL.md
-# frontmatter, not forced transitive installs. They are invoked when present;
-# see references/composition.md. Keeping them out of skill_references keeps this
-# unit's install self-contained and avoids coord-resolution failures.
-skill_references = []
+# ONE HARD REFERENCE, AND IT IS A RUNTIME FILE DEPENDENCY.
+#
+# The worktree machinery this skill used to ship — `wt`, new-change.sh,
+# close-change.sh, bootstrap-home.sh, agent-home.sh and the shared `lib.sh` —
+# now belongs to `git-issue-workflow`. An integration repository is a
+# SPECIALIZATION (it exists only when a repo has constituents); a ticket and a
+# worktree exist for EVERY repo, and an agent selects a skill by its
+# description, so the general machinery has to live in the skill a ticket agent
+# already opens. The dependency therefore runs specialized -> general:
+#
+#   git-integration-repo  ->  git-issue-workflow  ->  git-issue
+#
+# Every script left here — propagate.sh, refresh.sh, verify.sh,
+# init-integration.sh, add-constituent.sh, finalize-constituents.sh — sources
+# `die`/`info`/`step`/`help_guard` and the checkout predicates from that
+# `lib.sh`, through the single resolver in scripts/integration-lib.sh. So this
+# is not a semantic edge and not an optional composition: without the reference,
+# `install git-integration-repo` SUCCEEDS and then every entry point here
+# refuses at source time with a missing lib.sh. The earlier comment here said
+# an empty list "keeps this unit's install self-contained"; that stopped being
+# true the moment the library moved, and a stale rationale is worse than none.
+#
+# The coordinate is a git repo ROOT (github:owner/repo), NOT the installed skill
+# name — the resolver clones the repo and detects the unit from its root marker
+# files, and the two names differ here as they do elsewhere:
+#
+#   github:haydenrear/git-issue-workflow-skill -> skill "git-issue-workflow"
+#
+# The composed skills (spec-double-compiler, test-graph, deploy-helm) stay OUT
+# of this list on purpose: they are semantic imports declared in SKILL.md
+# frontmatter, invoked when present, and forcing them transitively is a
+# different kind of edge. See references/composition.md.
+skill_references = [
+  "github:haydenrear/git-issue-workflow-skill",
+]
 
 # git, and optionally the git host CLI (glab for GitLab MRs/issues, gh for
 # GitHub), are assumed already on PATH. propagate.sh detects which is available

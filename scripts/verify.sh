@@ -4,7 +4,7 @@
 #   - parent working tree is clean
 #   - every manifest constituent exists, has its own .git, has an origin remote,
 #     and is NOT tracked by the parent as a gitlink (mode 160000)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/integration-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'

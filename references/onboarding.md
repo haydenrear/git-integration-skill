@@ -7,7 +7,7 @@ ordering below is not cosmetic.
 ## Procedure
 
 ```bash
-S=<this-skill>/scripts
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
 
 # 1. Scaffold the parent (markers, root .gitignore, git init).
 $S/init-integration.sh my-integration /path/to/parent
@@ -43,7 +43,10 @@ $S/verify.sh
 git add -A && git commit -m "scaffold compositions + markers"
 
 # 9. Give the repo its own skill-manager home, so agents working here never
-#    touch the operator's global one (see references/skill-homes.md):
+#    touch the operator's global one. THE HOME MACHINERY IS NOT THIS SKILL'S:
+#    bootstrap-home.sh and agent-home.sh ship with git-issue-workflow, because
+#    every repo has checkouts and only some have constituents. Full mechanism in
+#    that skill's references/skill-homes.md.
 #      - RECOMMENDED, not required: add the ignore rules to the ROOT .gitignore
 #        and prove them with `git check-ignore -v`. bootstrap-home.sh does NOT
 #        need them — it writes a per-checkout rule into .git/info/exclude for
@@ -52,17 +55,19 @@ git add -A && git commit -m "scaffold compositions + markers"
 #        checkout, a CI job or a vendored constituent could not make). What
 #        committing the rules buys is that everyone ELSE who clones this repo
 #        gets a clean tree too: the exclude rule is invisible to them.
-#      - write skill-project.toml declaring the units this repo's agents need
-#      - cp $S/agent-home.sh scripts/   (the locator this skill ships), then
-#        `scripts/agent-home.sh` from the repo root is the same thing as the
-#        line below and needs to know nothing about where the skill lives
-$S/bootstrap-home.sh --root .
+#      - write skill-project.toml declaring the units this repo's agents need.
+#        Declare git-issue-workflow: it is what every ticket worktree in this
+#        repo is created and torn down with, and this skill's own scripts source
+#        their shared library from it.
+W="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts"
+$W/bootstrap-home.sh --root .
 ```
 
-Step 9's recommended ignore rules are listed in `references/skill-homes.md`,
-along with what the bootstrap actually writes and who does not see it.
-`agent-home.sh` prints which copy of `bootstrap-home.sh` it ran, and refuses a
-copy too old to project a home's skills into its agent directories.
+Step 9's recommended ignore rules are listed in git-issue-workflow's
+`references/skill-homes.md`, along with what the bootstrap actually writes and
+who does not see it. An agent never has to be told this step at all: `wt new` in
+a repo with no home refuses with exit 3 and prints this exact line, absolute, as
+its `fix:`.
 
 ## What each step guarantees
 

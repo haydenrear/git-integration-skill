@@ -3,7 +3,7 @@
 
 # This checkout's own Skill Manager home and the three agent homes beside it.
 #
-# Created by this repo's OWN scripts/bootstrap-home.sh, which is the only
+# Created by git-issue-workflow's bootstrap-home.sh, which is the only
 # implementation of the sequence. Never committed: a home is machine-local
 # state (absolute paths in home.runtime.json, a pinned CLI, installed unit
 # trees), and committing one would hand every other checkout this machine's

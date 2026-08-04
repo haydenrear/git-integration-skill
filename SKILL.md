@@ -3,12 +3,14 @@ name: git-integration-repo
 description: >-
   Create and operate "integration repositories" — a parent git repo that
   contains multiple constituent git repositories as ordinary tracked files
-  (never submodules), so cross-repo features can be made in a single worktree
-  and then fanned back out to each constituent as feature branches, MRs, and a
-  tracking issue. Use when the user wants to onboard several repos into one
-  integration repo, make a ticketed multi-repo change with worktrees, propagate
-  a merged change out to the underlying repos, or scaffold spec-double-compiler
-  / test-graph / deploy-helm support across all of them.
+  (never submodules), so one cross-repo change can be fanned back out to each
+  constituent as feature branches, MRs, and a tracking issue. Use when the user
+  wants to onboard several repos into one integration repo, propagate a merged
+  change out to the underlying repos, refresh the parent from upstream, or
+  scaffold spec-double-compiler / test-graph / deploy-helm support across all of
+  them. It does NOT create or tear down worktrees and does not own Skill Manager
+  homes: `git-issue-workflow` ships `wt` and does that for every repo, with or
+  without constituents. This skill is the specialization on top.
 skill-imports:
   - unit: spec-double-compiler
     path: SKILL.md
@@ -63,10 +65,14 @@ it into a gitlink/embedded-repo and the model breaks. Never do that. See
 ## When to use this skill
 
 - "Onboard these N repos into one integration repo."
-- "Make a change across service-a, service-b, and the shared lib on ticket X."
 - "I merged the integration change — push it out to the underlying repos."
 - "Scaffold tla-spec-dev / test_graph / deploy support across all of them."
 - "Refresh the integration repo from upstream."
+
+Not this skill: **"make a change across service-a, service-b and the shared lib
+on ticket X."** That is a ticket, and a ticket is `git-issue-workflow` — the
+worktree and its Skill Manager home are one `wt new` there, whatever shape the
+repo is. Come back here for the fan-out afterwards.
 
 ## Repository markers
 
@@ -91,85 +97,80 @@ constituent would clobber it.
 | Task | Read | Scripts |
 |---|---|---|
 | Create / onboard an integration repo | `references/onboarding.md` | `scripts/init-integration.sh`, `scripts/add-constituent.sh`, `scripts/finalize-constituents.sh`, `scripts/verify.sh` |
-| Give a checkout its own skill-manager home | `references/skill-homes.md` | `scripts/bootstrap-home.sh`, `scripts/selftest.sh` |
-| Make a ticketed multi-repo change | nothing — run `scripts/wt` and act on its output; `references/worktrees.md` is the explanation | `scripts/wt`, `scripts/new-change.sh`, `scripts/close-change.sh` |
+| Make a ticketed change (multi-repo or not) | nothing — `git-issue-workflow` owns it; see below | *(not here)* |
+| Give a checkout its own skill-manager home | `git-issue-workflow`'s `references/skill-homes.md` | *(not here)* |
 | Fan a merged change out to constituents | `references/propagation.md` | `scripts/propagate.sh` |
 | Scaffold spec / test-graph / deploy | `references/composition.md` | (invokes the composed skills) |
 | Refresh from upstream (destructive) | `references/git-model.md` | `scripts/refresh.sh` |
 | Understand *why* the git model works | `references/git-model.md` | — |
 
-## The cheap path: `scripts/wt`
+## Worktrees are not here: `git-issue-workflow` owns them
 
-Creating and closing worktrees is the thing this repo does all day, so it must
-cost an agent two commands and no reading. It does:
-
-```bash
-<this-skill>/scripts/wt new   TICKET-123     # worktree + its own home, launchable
-<this-skill>/scripts/wt close TICKET-123     # teardown, through the close-out gate
-```
-
-**`wt` is not on `PATH`.** Every spelling on this page begins with
-`<this-skill>/scripts/` for that reason: the line as printed has to be the line
-that runs, and a bare `wt` is not one. The `CLOSE` key `new-change.sh` prints is
-an absolute path for the same reason — and it is runnable **from any
-directory**, because `close` and `info` resolve a ticket against the worktrees
-that exist rather than against the repo you happen to be standing in.
-
-**A successful run costs one line, and the path on it is the answer.**
-
-```
-created worktree /path/to/repo-TICKET-123
-closed worktree /path/to/repo-TICKET-123 (branch feature/TICKET-123 kept; home work went no further than /path/to/repo/.skill-manager — push skill edits from there)
-```
-
-That second clause is the one thing a teardown cannot leave unsaid: the worktree
-home is deleted with the worktree, `home sync` moves an edit exactly one tier up
-into *this checkout's* home, and no further. A skill edit is not in that skill's
-own repository until you push it — from the main checkout, never from a worktree
-whose copy of the skill has just been deleted (git-integration-skill#8).
-
-**`new` takes as long as copying the home takes.** Measured here: ~48 s against
-an 18-unit / 852 MB project home, seconds against a small one — and nothing is
-printed until it finishes. If that may outlast your timeout, do not background
-it and poll: once a run passes `WT_PROGRESS_AFTER` seconds (default 25) `wt`
-prints one line on stderr naming a log file, and `tail -f` on that file shows
-the phases live at constant cost.
-
-Everything else follows from that path by construction, so it is not printed:
-the launcher is `<worktree>/.skill-manager/bin/launch/claude`, the drift-gate
-remedy is `<worktree>/.skill-manager/bin/cli/skill-manager home drift --ack`,
-and the teardown is `<this-skill>/scripts/wt close TICKET-123`. When you want
-them spelled out — for a worktree that already exists, creating and removing
-nothing:
+**`wt`, `new-change.sh`, `close-change.sh`, `bootstrap-home.sh`, `agent-home.sh`
+and the shared `lib.sh` are shipped by `git-issue-workflow`, not by this skill.**
+Nothing on this page creates or removes a worktree, and you do not need to read
+this page to make one:
 
 ```bash
-<this-skill>/scripts/wt info TICKET-123    # WORKTREE / BRANCH / LAUNCH / IF-EXIT-8 / CLOSE
+WT="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt"
+
+"$WT" new   TICKET-123     # worktree + its own Skill Manager home, launchable
+"$WT" close TICKET-123     # teardown, through the close-out gate
 ```
 
-A failure is three lines, and the second one runs:
+That is the same command in an integration repo, in a constituent of one, and in
+an ordinary repo with no constituents at all — `wt` detects which it is standing
+in. Its contract, its one-line output, its refusals and the per-checkout home
+mechanism are documented in that skill's `references/worktrees.md` and
+`references/skill-homes.md`.
+
+### Why they are there and not here
+
+An integration repository is a **specialization**: it exists only when a repo has
+constituents. A ticket and a worktree exist for **every** repo. So the general
+machinery cannot live in the specialized skill, and the dependency has to run
+specialized → general:
 
 ```
-error creating worktree: the project home /path/to/repo/.skill-manager holds no skills, ...
-fix: <this-skill>/scripts/bootstrap-home.sh --root /path/to/repo --onboard
-log: /tmp/new-change-a1b2c3.log
+git-integration-repo  ->  git-issue-workflow  ->  git-issue
 ```
 
-The reasoning is never printed — it is in the file the third line names, in
-full. Read it when the `fix:` line is not enough, and not before.
+The failure that forced this was a **selection** failure, not a path failure. An
+agent picks a skill by its `description`. This skill's says "onboard several
+repos into one integration repo" — so an agent working a plain repo read it,
+correctly concluded it was irrelevant, never opened it, never learned `wt`
+existed, and wrote its own worktree script, which knew none of the rules those
+files hold. Naming a resolvable path inside this page could not fix that: the
+agent has to be *told* the command every time and can never *discover* the
+capability. `git-issue-workflow`'s description is the one a ticket agent
+already matches on, so that is where the capability is now announced.
 
-`wt` holds no policy of its own — it picks a verb, suppresses the prose, and
-summarises the contract that `new-change.sh` and `close-change.sh` emit. Those
-two remain the implementation and remain a matched pair (issue #50), and the
-whole key set — now including `HOME-WORK` — is still printed by `wt info`,
-`wt … --verbose`, `wt close --dry-run` and `wt close --force`. The rest of this page and
-`references/worktrees.md` explain *why* each line is what it is; the happy path
-does not need them.
+Every script left here still uses `die`/`info`/`step`/`help_guard` and the
+checkout predicates. They **source** them from the installed dependency —
+`$SKILL_MANAGER_HOME/skills/git-issue-workflow/scripts/lib.sh` — through the
+single resolver in `scripts/integration-lib.sh`. One definition, one home, one
+resolved path to it; there is no second copy of `lib.sh` here and there must
+never be one. `skill-manager.toml` declares the hard `skill_reference` that
+guarantees the file, and `integration-lib.sh` refuses at source time — before
+anything runs, with the `skill-manager sync` that fixes it — when the installed
+copy is older than this skill needs.
+
+### What this skill still contributes to a ticket
+
+One key and one script: the constituent **fan-out**. `wt info TICKET-123` prints
+a `PROPAGATE` key in an integration repo and only there, resolved to this
+skill's `scripts/propagate.sh`; when the unit is not installed it prints the
+install command instead of a dead path. `wt` decides that by looking for
+`integration.toml` — an **artifact**, not an installed skill — which is
+deliberate: the marker is already the thing every script here keys on, it costs
+one `[ -f ]` per rung, and a plug-in mechanism for one boolean would be more
+machinery than the question deserves.
 
 ## Quick reference
 
 ```bash
 # scripts read integration.toml from the repo root; run them from anywhere in the repo
-S=<this-skill>/scripts
+S="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-integration-repo/scripts"
 
 # --- create ---
 $S/init-integration.sh my-integration            # scaffold markers, .gitignore, git init
@@ -178,85 +179,42 @@ git add -A && git commit -m "onboard constituents"   # commit BEFORE finalize
 $S/finalize-constituents.sh                       # re-init .git + remote + fetch + reset --hard, all constituents
 $S/verify.sh                                      # assert parent clean + every constituent wired
 
-# --- agent homes ---
-$S/bootstrap-home.sh --root <repo-root>            # this checkout's own skill-manager home (idempotent)
-#   --root defaults to the nearest git toplevel — inside a constituent that is
-#   the CONSTITUENT, not the integration parent. Re-running CHECKS
-#   <home>/bin/cli/skill-manager (written by `skill-manager home shims`, which
-#   pins the build that ran it) and re-runs `home shims` when the slot is
-#   absent, stale or a pre-#61 PATH-resolving shim. It never writes that file
-#   itself, and it refuses rather than re-pointing a pin whose build is gone.
-#   A WORKTREE clones from its project home (<main working tree>/.skill-manager),
-#   never from $SKILL_MANAGER_HOME, because that is the home close-change.sh
-#   reconciles it back into. No project home yet -> it refuses.
-#   A home that comes out with ZERO SKILLS is REFUSED (exit 5), never reported
-#   as verified: cloning copies units, it never installs any, so an empty source
-#   yields a perfectly wired home an agent gets no skills from. The refusal names
-#   `skill-manager onboard`. --onboard runs it (--skip-gateway by default, since
-#   the gateway is a contended singleton); for a worktree the remedy is always
-#   the PROJECT home, because units installed into the copy block teardown (#50).
-#   --allow-empty accepts an empty home deliberately.
-#   It also PROJECTS the home's skills into <root>/.claude|.codex|.gemini, which
-#   is where an agent reads them — a clone copies the STORE, and no agent reads
-#   the store. It materializes the links the home's own binding ledger already
-#   declares (instant, offline, touches no unit content, so the worktree stays
-#   closable) and falls back to `sync --skip-mcp` only for a unit that has no
-#   binding record. The run reports `projected: N of M` and prints `verified:`
-#   ONLY when N = M; a home whose skills an agent cannot read exits 6 and names
-#   every missing link. --allow-unprojected accepts one; --no-project skips it.
-#   OUTPUT: five lines on success — home / projected / verified / launch / log —
-#   with the whole transcript, this script's narration and the CLI's alike, in
-#   the file `log:` names. A failure prints a bounded tail of that file and its
-#   path. --verbose puts all of it on stderr live; --quiet prints nothing.
-$S/selftest.sh                                     # prove that pair on a disposable fixture, bare shell
-
-# --- change (the cheap path; see above) ---
-$S/wt new TICKET-123                               # worktree + home; stdout IS the next move
-$S/wt close TICKET-123                             # teardown through the gate
-
-# --- change (the same thing, with the prose) ---
-$S/new-change.sh TICKET-123                        # worktree on feature/TICKET-123
-#   ...acts on the NEAREST enclosing git repo and prints which one and of what
-#      kind (integration | constituent | standalone). From a constituent it
-#      branches the CONSTITUENT; add --integration for the parent instead.
-#   ...places the worktree BESIDE the outermost enclosing integration repo, so
-#      a nested repo's worktree never lands in the parent's constituents/.
-#   ...also bootstraps the worktree's OWN home; launch agents via
-#      ../<repo>-TICKET-123/.skill-manager/bin/launch/claude
-#      That first launch may be REFUSED with exit 8 — skill-manager gates a
-#      launch from a home whose units changed until the change has been read.
-#      Read it with `<that home>/bin/cli/skill-manager home drift`, then clear
-#      it with the same command plus `--ack`. See references/skill-homes.md.
-#   ...prints the contract on stdout and ONE line on stderr: the log holding its
-#      own narration and the bootstrap's. --verbose for it live, --quiet for
-#      neither (what `wt` passes).
-#   ...edit in the worktree, commit to the feature branch...
-git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
-
-# --- close ---
-$S/close-change.sh TICKET-123                      # gate on `home close-out`, THEN remove the worktree
-#   refuses (exit 4) while the worktree's home still holds unit work, naming
-#   each blocker and the command that clears it. HomeCloseOut names a resolved
-#   CLI path in every remedy (never a bare `skill-manager`, which on a machine
-#   with an older release on PATH exits 2); this script supplies the environment
-#   that resolution runs in — and NEVER names a home's own `bin/cli` pin in
-#   $SKILL_MANAGER_CLI, which would tell that pin to exec itself forever.
-#   --force discards deliberately. --dry-run works from inside the
-#   worktree; a real removal from inside it refuses.
-#   --into defaults to the project home the worktree was cloned FROM, wherever
-#   you are standing when you run it.
-#   Use this instead of a bare `git worktree remove`, which deletes the home
-#   and any unpushed skill edit in it without a word.
+# --- refresh (destructive) ---
+$S/refresh.sh                                     # fetch + reset --hard every constituent to its default branch
 
 # --- fan out ---
-$S/propagate.sh TICKET-123                          # per-constituent: branch, commit, push, MR + one tracking issue
+$S/propagate.sh TICKET-123                        # per-constituent: branch, commit, push, MR + one tracking issue
+$S/propagate.sh TICKET-123 --push                 # also push feature/TICKET-123 to each origin
+$S/propagate.sh TICKET-123 --push --mr            # also open a PR/MR each + one tracking issue
+
+# --- prove the above (from a CHECKOUT of this skill, not the installed copy:
+#     two of its checks sweep this unit's git index, which an install has none of) ---
+bash <checkout-of-git-integration-skill>/scripts/selftest.sh   # needs no skill-manager CLI
+
+# --- the worktree the change is MADE in: NOT here ---
+WT="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt"
+$WT new TICKET-123                                # worktree + its own home
+#   ...edit across constituent files in the one parent worktree, commit...
+git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
+$S/verify.sh                                      # then fan out with propagate.sh, above
+$WT close TICKET-123                              # teardown through the close-out gate
 ```
+
+Every entry point here answers `-h/--help` before doing anything, and refuses a
+first positional beginning with `-`. That is not politeness: `propagate.sh
+--help` once consumed `--help` as the TICKET and ran a real fan-out, and
+`init-integration.sh --help` scaffolded an integration repo called `--help` into
+the operator's own working directory. The guard is `help_guard` in
+`git-issue-workflow`'s `lib.sh`, called first by every script here, and
+`scripts/selftest.sh` sweeps this directory to keep it that way for scripts
+added later.
 
 `propagate.sh` fans a **parent** change out to constituents. Sending a **skill**
 edit an agent made inside its own home back to that skill's repo is a different
 flow (push-back) that `propagate.sh` cannot do, because the home is gitignored
-and never in the parent diff. `references/skill-homes.md` has the comparison;
-confusing the two silently loses the skill edit at worktree teardown.
+and never in the parent diff. `git-issue-workflow`'s `references/skill-homes.md`
+has the comparison; confusing the two silently loses the skill edit at worktree
+teardown.
 
 Always finish an onboarding or a propagation by running `scripts/verify.sh` and
 confirming the parent tree is clean.

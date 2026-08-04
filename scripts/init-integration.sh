@@ -2,7 +2,7 @@
 # init-integration.sh <name> [dir]
 # Scaffold a new integration repository: markers, root .gitignore, .integration/,
 # and `git init` if needed. Run add-constituent.sh next.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$SCRIPT_DIR/integration-lib.sh"
 ASSETS="$SCRIPT_DIR/../assets"
 
 usage() {
