@@ -112,17 +112,21 @@ Nothing on this page creates or removes a worktree, and you do not need to read
 this page to make one:
 
 ```bash
-WT="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt"
+skt ticket new   TICKET-123   # preferred: on PATH in skt-carrying homes
+skt ticket close TICKET-123
 
+# fallback for a checkout without skt — same lifecycle underneath:
+WT="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt"
 "$WT" new   TICKET-123     # worktree + its own Skill Manager home, launchable
 "$WT" close TICKET-123     # teardown, through the close-out gate
 ```
 
-That is the same command in an integration repo, in a constituent of one, and in
-an ordinary repo with no constituents at all — `wt` detects which it is standing
-in. Its contract, its one-line output, its refusals and the per-checkout home
-mechanism are documented in that skill's `references/worktrees.md` and
-`references/skill-homes.md`.
+That is the same lifecycle in an integration repo, in a constituent of one, and
+in an ordinary repo with no constituents at all — it detects which it is
+standing in. Its contract, its one-line output, its refusals and the
+per-checkout home mechanism are documented in git-issue-workflow's
+`references/worktrees.md` and `references/skill-homes.md`; session orientation
+(what is loaded, which tier, ticket/epic state) is `skt status`.
 
 ### Why they are there and not here
 
