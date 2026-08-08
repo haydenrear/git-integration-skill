@@ -66,8 +66,16 @@ $W/bootstrap-home.sh --root .
 Step 9's recommended ignore rules are listed in git-issue-workflow's
 `references/skill-homes.md`, along with what the bootstrap actually writes and
 who does not see it. An agent never has to be told this step at all: `wt new` in
-a repo with no home refuses with exit 3 and prints this exact line, absolute, as
-its `fix:`.
+a repo with no home refuses with exit **3** and prints this exact line, absolute,
+as its `fix:`.
+
+Exit 3 is not the only refusal any more, so do not read a non-zero `wt new` as
+"this repo has no home". Exit **7** means the base branch is BEHIND its remote
+counterpart — a bare base name resolves to the LOCAL ref, and a local branch does
+not advance when its PRs are merged server-side. Its `fix:` line branches from the
+published tip and runs as printed. Each refusal names its own remedy, so the rule
+is the same either way: **run the `fix:` line it printed**, not a remembered one.
+(git-issue-workflow's `references/worktrees.md` § *The branch point*.)
 
 ## What each step guarantees
 
