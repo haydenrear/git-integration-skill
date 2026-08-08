@@ -196,12 +196,14 @@ $S/propagate.sh TICKET-123 --push --mr            # also open a PR/MR each + one
 bash <checkout-of-git-integration-skill>/scripts/selftest.sh   # needs no skill-manager CLI
 
 # --- the worktree the change is MADE in: NOT here ---
+skt ticket new TICKET-123                         # preferred where the skt plugin is installed
 WT="${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt"
-$WT new TICKET-123                                # worktree + its own home
+$WT new TICKET-123                                # the same door where skt is absent
 #   ...edit across constituent files in the one parent worktree, commit...
 git -C <repo-root> merge --no-ff feature/TICKET-123   # bring it back to the integration main tree
 $S/verify.sh                                      # then fan out with propagate.sh, above
-$WT close TICKET-123                              # teardown through the close-out gate
+skt ticket close TICKET-123                       # teardown through the close-out gate
+$WT close TICKET-123                              #   (same gate where skt is absent)
 ```
 
 Every entry point here answers `-h/--help` before doing anything, and refuses a
